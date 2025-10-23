@@ -33,8 +33,6 @@ namespace mytorch{
             class ReshapeFunc;
             template<typename T>
             class MatmulFunc;
-            template<typename T>
-            class EqFunc;
         }
     };
 
@@ -232,12 +230,15 @@ namespace mytorch{
 
 
     template <typename T>
-    class Tensor{
+    class TensorRaw{
         private:
             size_t size_;
             std::vector<size_t> shape_;
             std::vector<size_t> strides;
             cuda_shared_pointer<T> data_;
+            bool requires_grad_;
+            cuda_shared_pointer<T> grad_;
+            std::shared_ptr<nn::Functional::Function<T>> grad_fn_;
             size_t get_strides_with_shape(const std::vector<size_t> & shape){
                 strides = {};
                 size_t nowstride = 1;
@@ -259,25 +260,43 @@ namespace mytorch{
             friend class nn::Functional::TransposeFunc<T>;
             friend class nn::Functional::ReshapeFunc<T>;
             friend class nn::Functional::MatmulFunc<T>;
-            friend class nn::Functional::EqFunc<T>;
             size_t size() const{
                 return size_;
             }
+            void set_requires_grad(bool requires_grad){
+                requires_grad_ = requires_grad;
+            }
+            bool requires_grad() const {
+                return requires_grad_;
+            }
+            void set_grad_fn(const std::shared_ptr<nn::Functional::Function<T>> & grad_fn){
+                grad_fn_ = grad_fn;
+            }
+            cuda_shared_pointer<T> & get_shared_ptr(){
+                return data_;
+            }
+            const cuda_shared_pointer<T> & get_shared_ptr() const{
+                return data_;
+            }
 
-
-
-            Tensor(const Tensor& other) {
+            TensorRaw(const TensorRaw& other) {
                 shape_ = other.shape_;
                 strides = other.strides;
                 size_ = other.size_;
                 data_ = other.data_;
+                requires_grad_ = other.requires_grad_;
+                grad_ = other.grad_;
+                grad_fn_ = other.grad_fn_;
             }
-            Tensor & operator=(const Tensor& other) {
+            TensorRaw & operator=(const TensorRaw& other) {
                 if (this == &other) return *this;
                 shape_ = other.shape_;
                 strides = other.strides;
                 size_ = other.size_;
                 data_ = other.data_;
+                requires_grad_ = other.requires_grad_;
+                grad_ = other.grad_;
+                grad_fn_ = other.grad_fn_;
                 return *this;
             }
             Device device() const{
@@ -301,7 +320,7 @@ namespace mytorch{
             }
 
             
-            Tensor(const std::vector<size_t> & shape ,const Device device=Cpu){
+            TensorRaw(const std::vector<size_t> & shape ,const Device device=Cpu){
                 shape_ = shape;
                 size_ = get_strides_with_shape(shape);
                 data_ = cuda_shared_pointer<T>(size_ , device);
@@ -311,29 +330,35 @@ namespace mytorch{
                 else{
                     CHECK(cudaMemset(data_.get(), 0, size_ * sizeof(T)));
                 }
+                requires_grad_ = false;
+                grad_ = cuda_shared_pointer<T>();
+                grad_fn_ = nullptr;
             }
-            Tensor(){
+            TensorRaw(){
                 shape_ = {};
                 size_ = 0;
                 strides = {};
                 data_ = cuda_shared_pointer<T>();
+                requires_grad_ = false;
+                grad_ = cuda_shared_pointer<T>();
+                grad_fn_ = nullptr;
             }
             int ref_count() const{
                 return data_.ref_count();
             }
             template <typename U>
-            friend Tensor<U> arange(const U & start ,const U & end , const U & step , const Device device);
+            friend TensorRaw<U> arange_raw(const U & start ,const U & end , const U & step , const Device device);
             template <typename U>
-            friend Tensor<U> zeros(const std::vector<size_t>& shape, const Device device );
+            friend TensorRaw<U> zeros_raw(const std::vector<size_t>& shape, const Device device );
             template <typename U>
-            friend Tensor<U> ones(const std::vector<size_t>& shape, const Device device );
+            friend TensorRaw<U> ones_raw(const std::vector<size_t>& shape, const Device device );
             template <typename U>
-            friend Tensor<U> rand(const std::vector<size_t>& shape, const Device device );
+            friend TensorRaw<U> rand_raw(const std::vector<size_t>& shape, const Device device );
             template <typename U>
-            friend Tensor<U> randn(const std::vector<size_t>& shape, const Device device );
+            friend TensorRaw<U> randn_raw(const std::vector<size_t>& shape, const Device device );
             // no need for destruction
             void print() const {
-                Tensor<T> self = *this;
+                TensorRaw<T> self = *this;
                 if(self.device() == Cuda){
                     self = this->deepcopy();
                     self.to(Cpu);
@@ -387,34 +412,27 @@ namespace mytorch{
                     throw std::runtime_error("print() on null tensor");
                 }
             }
-            Tensor<T> deepcopy() const{
-                Tensor<T> result;
+            TensorRaw<T> deepcopy() const{
+                TensorRaw<T> result;
                 result.data_ = data_.deepcopy();
                 result.size_ = size_;
                 result.strides = strides;
                 result.shape_ =  shape_;
+                result.requires_grad_ = requires_grad_;
+                result.grad_ = grad_;
+                result.grad_fn_ = grad_fn_;
                 return result;
             }
 
-            Tensor<T> operator+(const Tensor<T> & b) const;
-            Tensor<T> operator-() const;
-            Tensor<T> operator-(const Tensor<T> & b) const;
-            Tensor<T> operator*(const Tensor<T> & b) const;
-            Tensor<T> operator/(const Tensor<T> & b) const;
-            Tensor<T> relu() const;
-            Tensor<T> sigmoid() const;
-            Tensor<T> transpose(const std::vector<size_t> & perm) const;
-            Tensor<T> reshape(const std::vector<size_t> & newshape) const;
-            Tensor<T> matmul(const Tensor<T> & b) const;
     };
     template<typename T>
-    Tensor<T> arange(const T & start ,const T & end , const T & step = T(1) , const Device device = Cpu ){
+    TensorRaw<T> arange_raw(const T & start ,const T & end , const T & step = T(1) , const Device device = Cpu ){
         std::vector<T> values;
         for(T val = start;val < end;val += step){
             values.push_back(val);
         }
         std::vector<size_t> shape = { values.size() };
-        Tensor<T> result(shape, device);
+        TensorRaw<T> result(shape, device);
         if (device == Cpu){
             std::copy(values.begin(), values.end(), result.data_.get());
         }
@@ -424,8 +442,8 @@ namespace mytorch{
         return result;
     }
     template<typename T>
-    Tensor<T> zeros(const std::vector<size_t>& shape, const Device device = Cpu) {
-        return Tensor<T>(shape, device);
+    TensorRaw<T> zeros_raw(const std::vector<size_t>& shape, const Device device = Cpu) {
+        return TensorRaw<T>(shape, device);
     }
     template <typename T>
     __global__ void _fillWithOne(T* d_data, int n) {
@@ -436,8 +454,8 @@ namespace mytorch{
     }
 
     template<typename T>
-    Tensor<T> ones(const std::vector<size_t>& shape, const Device device = Cpu) {
-        Tensor<T> result(shape, device);
+    TensorRaw<T> ones_raw(const std::vector<size_t>& shape, const Device device = Cpu) {
+        TensorRaw<T> result(shape, device);
         if (device == Cpu){
             std::fill(result.data_.get(), result.data_.get() + result.size_, T(1));
         }
@@ -448,8 +466,8 @@ namespace mytorch{
     }
 
     template<typename T>
-    Tensor<T> rand(const std::vector<size_t>& shape, const Device device = Cpu) {
-        Tensor<T> result(shape, device);
+    TensorRaw<T> rand_raw(const std::vector<size_t>& shape, const Device device = Cpu) {
+        TensorRaw<T> result(shape, device);
         std::random_device rd;
         if (device == Cpu){
             std::mt19937 gen(rd());
@@ -475,8 +493,8 @@ namespace mytorch{
     }
 
     template<typename T>
-    Tensor<T> randn(const std::vector<size_t>& shape, const Device device = Cpu) {
-        Tensor<T> result(shape, device);
+    TensorRaw<T> randn_raw(const std::vector<size_t>& shape, const Device device = Cpu) {
+        TensorRaw<T> result(shape, device);
         if (device == Cpu){
             std::random_device rd;
             std::mt19937 gen(rd());
@@ -569,6 +587,183 @@ namespace mytorch{
                 return offset;
             }
     };
-};
+    template <typename T>
+    class Tensor{
+        private:
+            std::shared_ptr<TensorRaw<T>> data_ptr_;
+        public:
+            Tensor(){
+                data_ptr_ = nullptr;
+            }
+            friend class nn::Functional::AddFunc<T>;
+            friend class nn::Functional::Function<T>;
+            friend class nn::Functional::NegFunc<T>;
+            friend class nn::Functional::SubFunc<T>;
+            friend class nn::Functional::MulFunc<T>;
+            friend class nn::Functional::DivFunc<T>;
+            friend class nn::Functional::ReLUFunc<T>;
+            friend class nn::Functional::SigmoidFunc<T>;
+            friend class nn::Functional::TransposeFunc<T>;
+            friend class nn::Functional::ReshapeFunc<T>;
+            friend class nn::Functional::MatmulFunc<T>;
+            size_t size() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("size() on null tensor");
+                }
+                return data_ptr_->size();
+            }
+
+
+
+            Tensor(const Tensor & other) {
+                data_ptr_ = other.data_ptr_;
+            }
+            Tensor & operator=(const Tensor& other) {
+                if(this == &other) return *this;
+                data_ptr_ = other.data_ptr_;
+                return *this;
+            }
+            Device device() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("device() on null tensor");
+                }
+                return data_ptr_->device();
+            }
+            std::vector<size_t> shape() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("shape() on null tensor");
+                }
+                return data_ptr_->shape();
+            }
+            void to(Device device){
+                if(!data_ptr_){
+                    throw std::runtime_error("to() on null tensor");
+                }
+                data_ptr_->to(device);
+            }
+
+            T * get(){
+                if(!data_ptr_){
+                    throw std::runtime_error("get() on null tensor");
+                }
+                return data_ptr_->get();
+            }
+            const T * get() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("get() on null tensor");
+                }
+                return data_ptr_->get();
+            }
+            std::vector<size_t> get_strides() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("get_strides() on null tensor");
+                }
+                return data_ptr_->get_strides();
+            }
+
+
+            Tensor(const std::vector<size_t> & shape ,const Device device=Cpu){
+                data_ptr_ = std::make_shared<TensorRaw<T>>(shape , device);
+            }
+            int ref_count() const{
+                return data_ptr_.use_count();
+            }
+            template <typename U>
+            friend Tensor<U> arange(const U & start ,const U & end , const U & step , const Device device);
+            template <typename U>
+            friend Tensor<U> zeros(const std::vector<size_t>& shape, const Device device );
+            template <typename U>
+            friend Tensor<U> ones(const std::vector<size_t>& shape, const Device device );
+            template <typename U>
+            friend Tensor<U> rand(const std::vector<size_t>& shape, const Device device );
+            template <typename U>
+            friend Tensor<U> randn(const std::vector<size_t>& shape, const Device device );
+            // no need for destruction
+            void print() const {
+                if(!data_ptr_){
+                    throw std::runtime_error("print() on null tensor");
+                }
+                data_ptr_->print();
+            }
+            Tensor<T> deepcopy() const{
+                Tensor<T> result;
+                result.data_ptr_ = std::make_shared<TensorRaw<T>>(data_ptr_->deepcopy());
+                return result;
+            }
+
+            Tensor<T> operator+(const Tensor<T> & b) const;
+            Tensor<T> operator-() const;
+            Tensor<T> operator-(const Tensor<T> & b) const;
+            Tensor<T> operator*(const Tensor<T> & b) const;
+            Tensor<T> operator/(const Tensor<T> & b) const;
+            Tensor<T> relu() const;
+            Tensor<T> sigmoid() const;
+            Tensor<T> transpose(const std::vector<size_t> & perm) const;
+            Tensor<T> reshape(const std::vector<size_t> & newshape) const;
+            Tensor<T> matmul(const Tensor<T> & b) const;
+            bool requires_grad() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("requires_grad() on null tensor");
+                }
+                return data_ptr_->requires_grad();
+            }
+            void set_requires_grad(bool requires_grad){
+                if(!data_ptr_){
+                    throw std::runtime_error("set_requires_grad() on null tensor");
+                }
+                data_ptr_->set_requires_grad(requires_grad);
+            }
+            void set_grad_fn(const std::shared_ptr<nn::Functional::Function<T>> & grad_fn){
+                if(!data_ptr_){
+                    throw std::runtime_error("set_grad_fn() on null tensor");
+                }
+                data_ptr_->set_grad_fn(grad_fn);
+            }
+            cuda_shared_pointer<T> & get_shared_ptr(){
+                if(!data_ptr_){
+                    throw std::runtime_error("get_shared_ptr() on null tensor");
+                }
+                return data_ptr_->get_shared_ptr();
+            }
+            const cuda_shared_pointer<T> & get_shared_ptr() const{
+                if(!data_ptr_){
+                    throw std::runtime_error("get_shared_ptr() on null tensor");
+                }
+                return data_ptr_->get_shared_ptr();
+            }
+
+    };
+
+    template <typename U>
+    Tensor<U> arange(const U & start ,const U & end , const U & step , const Device device){
+        Tensor<U> result;
+        result.data_ptr_ = std::make_shared<TensorRaw<U>>(arange_raw<U>(start , end , step , device));
+        return result;
+    }
+    template <typename U>
+    Tensor<U> zeros(const std::vector<size_t>& shape, const Device device ){
+        Tensor<U> result;
+        result.data_ptr_ = std::make_shared<TensorRaw<U>>(zeros_raw<U>(shape , device));
+        return result;
+    }
+    template <typename U>
+    Tensor<U> ones(const std::vector<size_t>& shape, const Device device ){
+        Tensor<U> result;
+        result.data_ptr_ = std::make_shared<TensorRaw<U>>(ones_raw<U>(shape , device));
+        return result;
+    }
+    template <typename U>
+    Tensor<U> rand(const std::vector<size_t>& shape, const Device device ){
+        Tensor<U> result;
+        result.data_ptr_ = std::make_shared<TensorRaw<U>>(rand_raw<U>(shape , device));
+        return result;
+    }
+    template <typename U>
+    Tensor<U> randn(const std::vector<size_t>& shape, const Device device ){
+        Tensor<U> result;
+        result.data_ptr_ = std::make_shared<TensorRaw<U>>(randn_raw<U>(shape , device));
+        return result;
+    }
+}
 
 #endif

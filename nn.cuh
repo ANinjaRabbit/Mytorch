@@ -69,38 +69,48 @@ namespace nn{
                 virtual ~Function() = default;
                 virtual Tensor<T> forward(const std::vector<Tensor<T>> & inputs) = 0;
                 virtual std::vector<Tensor<T>> backward(const Tensor<T>& grad_output) = 0;
+                virtual std::vector<Tensor<T>> get_inputs() const = 0;
         };
 
         
         template <typename T>
         class NegFunc : public Function<T>{
+            private:
+                Tensor<T> input;
             public:
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                     if (inputs.size() != 1){
                         throw std::runtime_error("NegFunc error!");
                     }
-                    Tensor<T> result(inputs[0].shape_ , inputs[0].device());
+                    if(inputs[0].requires_grad()){
+                        input = inputs[0];
+                    }
+                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
                     if (result.device() == Cuda){
-                        _neg_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.data_.get() , inputs[0].data_.get() , result.size() );
+                        _neg_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , inputs[0].get() , result.size() );
                     }
                     else{
                         for(size_t i = 0;i < result.size();i++){
-                            result.data_[i] = - inputs[0].data_[i];
+                            result.get()[i] = - inputs[0].get()[i];
                         }
                     }
+                    result.set_requires_grad(inputs[0].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T>& grad_output){
                     Tensor<T> gradin(grad_output.shape() , grad_output.device());
                     if(gradin.device() == Cuda){
-                        _neg_forward_kernel<<<CudaGetBlocks(gradin.size()) , kCudaThreadsNum>>>(gradin.data_.get() , grad_output.data_.get() , gradin.size());
+                        _neg_forward_kernel<<<CudaGetBlocks(gradin.size()) , kCudaThreadsNum>>>(gradin.get() , grad_output.get() , gradin.size());
                     }
                     else{
                         for(size_t i = 0; i < gradin.size();i++){
-                            gradin.data_[i] = -grad_output.data_[i];
+                            gradin.get()[i] = -grad_output.get()[i];
                         }
                     }
                     return {gradin};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {input};
                 }
         };
         template <typename T>
@@ -114,28 +124,38 @@ namespace nn{
 
         template <typename T>
         class AddFunc : public Function<T>{
+            private:
+                Tensor<T> a , b;
             public:
                 AddFunc() = default;
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-                    if (inputs.size() != 2 || inputs[0].shape_ != inputs[1].shape_){
+                    if (inputs.size() != 2 || inputs[0].shape() != inputs[1].shape()){
                         throw std::runtime_error("AddFunc error!");
+                    }
+                    if (inputs[0].requires_grad() || inputs[1].requires_grad()){
+                        a = inputs[0];
+                        b = inputs[1];
                     }
                     if (inputs[0].device() != inputs[1].device()){
                         throw std::runtime_error("AddFunc error!");
                     }
-                    Tensor<T> result(inputs[0].shape_ , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
                     if (result.device() == Cuda){
-                        _add_forward_kernel<<<CudaGetBlocks(result.size()), kCudaThreadsNum>>>(result.data_.get(), inputs[0].data_.get(), inputs[1].data_.get() , result.size());
+                        _add_forward_kernel<<<CudaGetBlocks(result.size()), kCudaThreadsNum>>>(result.get(), inputs[0].get(), inputs[1].get() , result.size());
                     }
                     else{
                         for (int i = 0; i < result.size(); i++){
-                            result.data_.get()[i] = inputs[0].data_.get()[i] + inputs[1].data_.get()[i];
+                            result.get()[i] = inputs[0].get()[i] + inputs[1].get()[i];
                         }
                     }
+                    result.set_requires_grad(inputs[0].requires_grad() || inputs[1].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
                     return {grad_out.deepcopy() , grad_out.deepcopy()};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a , b};
                 }
         };
         template <typename T>
@@ -147,28 +167,37 @@ namespace nn{
         }
         template <typename T>
         class SubFunc : public Function<T>{
+            private:
+                Tensor<T> a , b;
             public:
                 SubFunc() = default;
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-                    if (inputs.size() != 2 || inputs[0].shape_ != inputs[1].shape_){
+                    if (inputs.size() != 2 || inputs[0].shape() != inputs[1].shape()){
                         throw std::runtime_error("SubFunc error!");
+                    }
+                    if (inputs[0].requires_grad() || inputs[1].requires_grad()){
+                        a = inputs[0];
+                        b = inputs[1];
                     }
                     if (inputs[0].device() != inputs[1].device()){
                         throw std::runtime_error("SubFunc error!");
                     }
-                    Tensor<T> result(inputs[0].shape_ , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
                     if (result.device() == Cuda){
-                        _sub_forward_kernel<<<CudaGetBlocks(result.size()), kCudaThreadsNum>>>(result.data_.get(), inputs[0].data_.get(), inputs[1].data_.get(),result.size());
+                        _sub_forward_kernel<<<CudaGetBlocks(result.size()), kCudaThreadsNum>>>(result.get(), inputs[0].get(), inputs[1].get(),result.size());
                     }
                     else{
                         for (int i = 0; i < result.size(); i++){
-                            result.data_.get()[i] = inputs[0].data_.get()[i] - inputs[1].data_.get()[i];
+                            result.get()[i] = inputs[0].get()[i] - inputs[1].get()[i];
                         }
                     }
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_output) override{
                     return {grad_output.deepcopy() , (-grad_output).deepcopy()};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a , b};
                 }
         };
 
@@ -185,41 +214,43 @@ namespace nn{
             private:
                 Tensor<T> a , b;
             public:
-                MulFunc(){
-                    a = Tensor<T>();
-                    b = Tensor<T>();
-                }
 
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-                    a = inputs[0].deepcopy() , b = inputs[1].deepcopy();
                     if(inputs.size() != 2 || inputs[0].shape() != inputs[1].shape() || inputs[0].device() != inputs[1].device()){
                         throw std::runtime_error("MulFunc error!");
                     }
+                    if(inputs[0].requires_grad() || inputs[1].requires_grad()){
+                        a = inputs[0] , b = inputs[1];
+                    }
                     Tensor<T> result(inputs[0].shape() , inputs[0].device());
                     if(result.device() == Cuda){
-                        _mul_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.data_.get() , inputs[0].data_.get() , inputs[1].data_.get(), result.size());
+                        _mul_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , inputs[0].get() , inputs[1].get(), result.size());
                     }
                     else{
                         for (int i = 0; i < result.size(); i++){
-                            result.data_.get()[i] = inputs[0].data_.get()[i] * inputs[1].data_.get()[i];
+                            result.get()[i] = inputs[0].get()[i] * inputs[1].get()[i];
                         }
                     }
+                    result.set_requires_grad(inputs[0].requires_grad() || inputs[1].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
                     Tensor<T> grad_a(grad_out.shape() , grad_out.device());
                     Tensor<T> grad_b(grad_out.shape() , grad_out.device());
                     if (grad_out.device() == Cuda){
-                        _mul_forward_kernel<<<CudaGetBlocks(grad_a.size()) , kCudaThreadsNum>>>(grad_a.data_.get() , grad_out.data_.get() , b.data_.get() , grad_a.size());
-                        _mul_forward_kernel<<<CudaGetBlocks(grad_b.size()) , kCudaThreadsNum>>>(grad_b.data_.get() , grad_out.data_.get() , a.data_.get() , grad_b.size());
+                        _mul_forward_kernel<<<CudaGetBlocks(grad_a.size()) , kCudaThreadsNum>>>(grad_a.get() , grad_out.get() , b.get() , grad_a.size());
+                        _mul_forward_kernel<<<CudaGetBlocks(grad_b.size()) , kCudaThreadsNum>>>(grad_b.get() , grad_out.get() , a.get() , grad_b.size());
                     }
                     else{
                         for (int i = 0;i<grad_a.size();i++){
-                            grad_a.data_.get()[i] = grad_out.data_.get()[i] * b.data_.get()[i];
-                            grad_b.data_.get()[i] = grad_out.data_.get()[i] * a.data_.get()[i];
+                            grad_a.get()[i] = grad_out.get()[i] * b.get()[i];
+                            grad_b.get()[i] = grad_out.get()[i] * a.get()[i];
                         }
                     }
                     return {grad_a , grad_b};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a , b};
                 }
         };
         template <typename T>
@@ -251,35 +282,42 @@ namespace nn{
             public:
                 DivFunc() = default;
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-                    a = inputs[0] , b = inputs[1];
                     if(inputs.size() != 2 || inputs[0].shape() != inputs[1].shape() || inputs[0].device() != inputs[1].device()){
                         throw std::runtime_error("DivFunc error!");
                     }
+                    if(inputs[0].requires_grad() || inputs[1].requires_grad()){
+                        a = inputs[0] , b = inputs[1];
+                    }
                     Tensor<T> result(inputs[0].shape() , inputs[0].device());
                     if(result.device() == Cuda){
-                        _div_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.data_.get() , inputs[0].data_.get() , inputs[1].data_.get(), result.size());
+                        _div_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , inputs[0].get() , inputs[1].get(), result.size());
                     }
                     else{
                         for (int i = 0; i < result.size(); i++){
-                            result.data_.get()[i] = inputs[0].data_.get()[i] / inputs[1].data_.get()[i];
+                            result.get()[i] = inputs[0].get()[i] / inputs[1].get()[i];
                         }
                     }
+
+                    result.set_requires_grad(inputs[0].requires_grad() || inputs[1].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
                     Tensor<T> grad_a(grad_out.shape() , grad_out.device());
                     Tensor<T> grad_b(grad_out.shape() , grad_out.device());
                     if (grad_out.device() == Cuda){
-                        _div_backward_kernel_1<<<CudaGetBlocks(grad_a.size()) , kCudaThreadsNum>>>(grad_a.data_.get() , grad_out.data_.get() , b.data_.get() , grad_a.size());
-                        _div_backward_kernel_2<<<CudaGetBlocks(grad_b.size()) , kCudaThreadsNum>>>(grad_b.data_.get() , grad_out.data_.get() , a.data_.get() , b.data_.get() , grad_b.size());
+                        _div_backward_kernel_1<<<CudaGetBlocks(grad_a.size()) , kCudaThreadsNum>>>(grad_a.get() , grad_out.get() , b.get() , grad_a.size());
+                        _div_backward_kernel_2<<<CudaGetBlocks(grad_b.size()) , kCudaThreadsNum>>>(grad_b.get() , grad_out.get() , a.get() , b.get() , grad_b.size());
                     }
                     else{
                         for (int i = 0;i<grad_a.size();i++){
-                            grad_a.data_.get()[i] = grad_out.data_.get()[i] / b.data_.get()[i];
-                            grad_b.data_.get()[i] = - grad_out.data_.get()[i] * a.data_.get()[i] / (b.data_.get()[i] * b.data_.get()[i]);
+                            grad_a.get()[i] = grad_out.get()[i] / b.get()[i];
+                            grad_b.get()[i] = - grad_out.get()[i] * a.get()[i] / (b.get()[i] * b.get()[i]);
                         }
                     }
                     return {grad_a , grad_b};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a , b};
                 }
 
         };
@@ -312,37 +350,45 @@ namespace nn{
         class ReLUFunc : public Function<T>{
             private:
                 cuda_shared_pointer<bool> mask;
+                Tensor<T> a;
             public:
                 ReLUFunc() = default;
                 Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
                     if(input.size() != 1){
                         throw std::runtime_error("ReLUFunc error!");
                     }
+                    if(input[0].requires_grad()){
+                        a = input[0];
+                    }
                     Tensor<T> result(input[0].shape() , input[0].device());
                     mask = cuda_shared_pointer<bool>(input[0].size() , input[0].device());
                     if( input[0].device() == Cuda){
-                        _relu_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.data_.get() , input[0].data_.get() , result.size());
-                        _relu_forward_kernel_mask<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(mask.get() , input[0].data_.get() , result.size());
+                        _relu_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , input[0].get() , result.size());
+                        _relu_forward_kernel_mask<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(mask.get() , input[0].get() , result.size());
                     }
                     else{
                         for (int i = 0; i < result.size(); i++){
-                            result.data_.get()[i] = input[0].data_.get()[i] > 0 ? input[0].data_.get()[i] : 0;
-                            mask.get()[i] = input[0].data_.get()[i] > 0;
+                            result.get()[i] = input[0].get()[i] > 0 ? input[0].get()[i] : 0;
+                            mask.get()[i] = input[0].get()[i] > 0;
                         }
                     }
+                    result.set_requires_grad(input[0].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
                     Tensor<T> grad_input(grad_out.shape() , grad_out.device());
                     if(grad_out.device() == Cuda){
-                        _relu_backward_kernel<<<CudaGetBlocks(grad_input.size()) , kCudaThreadsNum>>>(grad_input.data_.get() , grad_out.data_.get() , mask.get() , grad_input.size());
+                        _relu_backward_kernel<<<CudaGetBlocks(grad_input.size()) , kCudaThreadsNum>>>(grad_input.get() , grad_out.get() , mask.get() , grad_input.size());
                     }
                     else{
                         for (int i = 0; i < grad_input.size(); i++){
-                            grad_input.data_.get()[i] = mask.get()[i] ? grad_out.data_.get()[i] : 0;
+                            grad_input.get()[i] = mask.get()[i] ? grad_out.get()[i] : 0;
                         }
                     }
                     return {grad_input};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a};
                 }
 
         };
@@ -359,28 +405,36 @@ namespace nn{
         class SigmoidFunc : public Function<T>{
             private:
                 Tensor<T> output;
+                Tensor<T> a;
             public:
                 SigmoidFunc() = default;
                 Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
                     if(input.size() != 1){
                         throw std::runtime_error("SigmoidFunc error!");
                     }
+                    if(input[0].requires_grad()){
+                        a = input[0];
+                    }
                     Tensor<T> result(input[0].shape() , input[0].device());
                     if( input[0].device() == Cuda){
-                        _sigmoid_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.data_.get() , input[0].data_.get() , result.size());
+                        _sigmoid_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , input[0].get() , result.size());
                     }
                     else{
                         for (int i = 0; i < result.size(); i++){
-                            result.data_.get()[i] = 1 / (1 + std::exp(-input[0].data_.get()[i]));
+                            result.get()[i] = 1 / (1 + std::exp(-input[0].get()[i]));
                         }
                     }
                     output = result.deepcopy();
+                    result.set_requires_grad(input[0].requires_grad());
                     return result;
-
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
                     return {(grad_out * (output * (mytorch::ones<T>(output.shape() , output.device()) - output))).deepcopy()};
                 }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a};
+                }
+
         };
 
         template <typename T>
@@ -461,13 +515,18 @@ namespace nn{
         class TransposeFunc : public Function<T>{
             private:
                 std::vector<size_t> perm;
+                Tensor<T> a;
             public:
                 TransposeFunc(const std::vector<size_t> & perm) : perm(perm){}
                 Tensor<T> forward(const std::vector<Tensor<T>> & input ) override{
                     if(input.size() != 1)
                         throw std::runtime_error("TransposeFunc error!");
+                    if(input[0].requires_grad()){
+                        a = input[0];
+                    }
                     std::vector<size_t> newshape = _get_transpose_vec(input[0].shape() , perm);
                     Tensor<T> result(newshape , input[0].device());
+                    result.set_requires_grad(input[0].requires_grad());
                     if(result.device() == Cuda){
                         std::vector<size_t> revperm = _get_reverse_perm(perm);
                         size_t totalthreads = 1;
@@ -501,7 +560,7 @@ namespace nn{
                             for(int i = 0;i<ndim;i++){
                                 outindex += outidx[i] * strides[i];
                             }
-                            result.data_.get()[outindex] = input[0].data_.get()[index];
+                            result.get()[outindex] = input[0].get()[index];
                         }
                     }
 
@@ -510,6 +569,12 @@ namespace nn{
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out){
                     return {grad_out.transpose(_get_reverse_perm(perm))};
                 }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a};
+                }
+
+
+
         };
 
         template <typename T>
@@ -517,19 +582,28 @@ namespace nn{
             private:
                 std::vector<size_t> newshape;
                 std::vector<size_t> oldshape;
+                Tensor<T> a;
             public:
                 ReshapeFunc(const std::vector<size_t> & newshape) : newshape(newshape){}
                 Tensor<T> forward(const std::vector<Tensor<T>> & input ) override{
                     oldshape = input[0].shape();
                     if(input.size() != 1 )
                         throw std::runtime_error("ReshapeFunc error!");
+                    if(input[0].requires_grad()){
+                        a = input[0];
+                    }
                     Tensor<T> result(newshape , input[0].device());
-                    result.data_ = input[0].data_;
+                    result.get_shared_ptr() = input[0].get_shared_ptr();
+                    result.set_requires_grad(input[0].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out){
                     return {grad_out.reshape(oldshape)};
                 }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a};
+                }
+
         };
 
         template <>
@@ -546,12 +620,14 @@ namespace nn{
                         input[0].get_strides()[0] != 1
                         || input[1].get_strides()[0] != 1)
                         throw std::runtime_error("MatmulFunc error!");
-                    
-                    a = input[0];
-                    b = input[1];
+                    if(input[0].requires_grad() || input[1].requires_grad()){
+                        a = input[0];
+                        b = input[1];
+                    }
                     std::vector<size_t> newshape = input[0].shape();
                     newshape[newshape.size() - 1] = input[1].shape()[input[1].shape().size() - 1];
                     Tensor<float> result(newshape , input[0].device());
+                    result.set_requires_grad(input[0].requires_grad() || input[1].requires_grad());
                     auto resultshape = result.shape();
                     auto input0shape = input[0].shape();
                     auto input1shape = input[1].shape();
@@ -614,6 +690,9 @@ namespace nn{
                     result.push_back(a.transpose(gradperm).matmul(grad_out));
                     return result;
                 }
+                std::vector<Tensor<float>> get_inputs() const override{
+                    return {a , b};
+                }
                 
         };
         template <>
@@ -630,13 +709,15 @@ namespace nn{
                         input[0].get_strides()[0] != 1
                         || input[1].get_strides()[0] != 1)
                         throw std::runtime_error("MatmulFunc error!");
-                    
-                    a = input[0];
-                    b = input[1];
+                    if(input[0].requires_grad() || input[1].requires_grad()){
+                        a = input[0];
+                        b = input[1];
+                    }
                     
                     std::vector<size_t> newshape = input[0].shape();
                     newshape[newshape.size() - 1] = input[1].shape()[input[1].shape().size() - 1];
                     Tensor<double> result(newshape , input[0].device());
+                    result.set_requires_grad(input[0].requires_grad() || input[1].requires_grad());
                     size_t step0 = input[0].get_strides()[2];
                     size_t step1 = input[1].get_strides()[2];
                     size_t stepresult = result.get_strides()[2];
@@ -696,17 +777,10 @@ namespace nn{
                     result.push_back(a.transpose(gradperm).matmul(grad_out));
                     return result;
                 }
+                std::vector<Tensor<double>> get_inputs() const override{
+                    return {a , b};
+                }
                 
-        };
-        template <typename T>
-        class EqFunc : public Function<T>{
-            public:
-            Tensor<T> forward(const std::vector<Tensor<T>> & input) const{
-                return input[0];
-            }
-            std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) const{
-                return {grad_out};
-            }
         };
 
         template <typename T>
