@@ -75,7 +75,25 @@ namespace mytorch{
         return nn::Functional::SigmoidFunc<T>().forward({*this});
     }
     template <typename T>
-    Tensor<T> Tensor<T>::transpose(const std::vector<size_t> & perm) const {
+    Tensor<T> Tensor<T>::transpose(const std::vector<size_t> & perm ) const {
+        if(perm.empty()){
+            // default permute last two dimensions
+            std::vector<size_t> default_perm(this->shape().size());
+            if(default_perm.size() < 2){
+                throw std::runtime_error("Transpose error: tensor ndim < 2");
+            }
+            for(int i = 0;i<this->shape().size();i++){
+                default_perm[i] = i;
+            }
+            std::swap(default_perm[default_perm.size() - 1] , default_perm[default_perm.size() - 2]);
+            if(this->requires_grad()){
+                auto f =  std::make_shared<nn::Functional::TransposeFunc<T>>(default_perm);
+                Tensor<T> result = f->forward({*this});
+                result.set_grad_fn(f);
+                return result;
+            }
+            return nn::Functional::TransposeFunc<T>(default_perm).forward({*this});
+        }
         if(this->requires_grad()){
             auto f =  std::make_shared<nn::Functional::TransposeFunc<T>>(perm);
             Tensor<T> result = f->forward({*this});
@@ -96,6 +114,9 @@ namespace mytorch{
     }
     template <typename T>
     Tensor<T> Tensor<T>::matmul(const Tensor<T> & other) const {
+        if(this->shape().size() != other.shape().size() ){
+            throw std::runtime_error("Matmul error");
+        }
         if(this->requires_grad() || other.requires_grad()){
             auto f =  std::make_shared<nn::Functional::MatmulFunc<T>>();
             Tensor<T> result = f->forward({*this , other});
@@ -104,6 +125,17 @@ namespace mytorch{
         }
         return nn::Functional::MatmulFunc<T>().forward({*this , other});
     }
+    template <typename T>
+    Tensor<T> Tensor<T>::pool2d(const std::vector<size_t> & kernel_shape) const {
+        if(this->requires_grad()){
+            auto f =  std::make_shared<nn::Functional::Pool2dFunc<T>>(kernel_shape);
+            Tensor<T> result = f->forward({*this});
+            result.set_grad_fn(f);
+            return result;
+        }
+        return nn::Functional::Pool2dFunc<T>(kernel_shape).forward({*this});
+    }
+
     template class Tensor<float>;
     template class Tensor<double>;
 
