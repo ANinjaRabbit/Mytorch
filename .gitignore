@@ -4,3 +4,5 @@ build/
 dlls/
 pybind11/
 mnist-data/
+.vscode/
+__pycache__/
