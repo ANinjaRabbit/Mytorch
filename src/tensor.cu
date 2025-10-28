@@ -2,6 +2,10 @@
 #include "tensor.cuh"
 
 namespace mytorch{
+    template class Tensor<float>;
+    template class Tensor<double>;
+
+
     template <typename T>
     Tensor<T> Tensor<T>::operator+(const Tensor<T>& other) const {
         if(this->requires_grad() || other.requires_grad()){
@@ -136,7 +140,5 @@ namespace mytorch{
         return nn::Functional::Pool2dFunc<T>(kernel_shape).forward({*this});
     }
 
-    template class Tensor<float>;
-    template class Tensor<double>;
 
 }

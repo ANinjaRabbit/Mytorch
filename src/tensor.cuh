@@ -1,5 +1,5 @@
-#ifndef MYTORCH_H_
-#define MYTORCH_H_
+#ifndef _TENSOR_H_
+#define _TENSOR_H_
 
 #include <memory>
 #include <vector>
@@ -307,6 +307,9 @@ namespace mytorch{
             void set_grad(const cuda_shared_pointer<T> & grad){
                 grad_ = grad;
             }
+            void set_grad(const TensorRaw<T> & grad){
+                grad_ = grad.data_;
+            }
             const cuda_shared_pointer<T> & get_grad() const{
                 return grad_;
             }
@@ -517,11 +520,13 @@ namespace mytorch{
         }
         return result;
     }
-
     template<typename T>
-    TensorRaw<T> rand_raw(const std::vector<size_t>& shape, const Device device = Cpu);
+    TensorRaw<T> rand_raw(const std::vector<size_t>& shape, const Device device = Cpu){
+        return TensorRaw<T>(shape, device);
+    }
+
     template<>
-    TensorRaw<float> rand_raw<float>(const std::vector<size_t>& shape, const Device device) {
+    inline TensorRaw<float> rand_raw<float>(const std::vector<size_t>& shape, const Device device) {
         TensorRaw<float> result(shape, device);
         std::random_device rd;
         if (device == Cpu){
@@ -541,7 +546,7 @@ namespace mytorch{
         return result;
     }
     template<>
-    TensorRaw<double> rand_raw<double>(const std::vector<size_t>& shape, const Device device) {
+    inline TensorRaw<double> rand_raw<double>(const std::vector<size_t>& shape, const Device device) {
         TensorRaw<double> result(shape, device);
         std::random_device rd;
         if (device == Cpu){
@@ -840,9 +845,9 @@ namespace mytorch{
                 }
                 return data_ptr_->get_shared_ptr();
             }
-            void set_grad(const cuda_shared_pointer<T> & grad){
+            void set_grad_(const cuda_shared_pointer<T> & grad){
                 if(!data_ptr_){
-                    throw std::runtime_error("set_grad() on null tensor");
+                    throw std::runtime_error("set_grad_() on null tensor");
                 }
                 data_ptr_->set_grad(grad);
             }
@@ -883,6 +888,18 @@ namespace mytorch{
             Tensor<T> & operator=(const T value){
                 data_ptr_ = std::make_shared<TensorRaw<T>>(full_raw<T>({1} , value , Cpu));
                 return *this;
+            }
+            T & operator[](const size_t index){
+                if(!data_ptr_){
+                    throw std::runtime_error("operator[] on null tensor");
+                }
+                return data_ptr_->get()[index];
+            }
+            const T & operator[](const size_t index) const{
+                if(!data_ptr_){
+                    throw std::runtime_error("operator[] on null tensor");
+                }
+                return data_ptr_->get()[index];
             }
     };
 

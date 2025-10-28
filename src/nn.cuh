@@ -1,5 +1,5 @@
-#ifndef MYTORCH_NN_H_
-#define MYTORCH_NN_H_
+#ifndef _NN_H_
+#define _NN_H_
 
 #include "tensor.cuh"
 #include <cublas_v2.h>
