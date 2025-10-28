@@ -14,7 +14,6 @@ void bind_tensor(py::module &m) {
         Tensor represents a multi-dimensional array that supports automatic differentiation.
         It holds data, gradients, and links to gradient functions in the computation graph.
         )doc")
-        // Constructors
         .def(py::init<>(), "Create an empty Tensor.")
         .def(py::init<const std::vector<size_t>&, const Device>(),
              py::arg("shape"), py::arg("device") = Cpu,
@@ -23,7 +22,6 @@ void bind_tensor(py::module &m) {
              py::arg("value"), py::arg("shape") = std::vector<size_t>{1}, py::arg("device") = Cpu,
              "Create a Tensor filled with a constant value.")
 
-        // Basic info
         .def("size", &Tensor<T>::size, "Return the total number of elements.")
         .def("shape", &Tensor<T>::shape, py::return_value_policy::reference_internal, "Return the shape of the Tensor.")
         .def("device", &Tensor<T>::device, "Return the current device (CPU or CUDA).")
@@ -31,21 +29,18 @@ void bind_tensor(py::module &m) {
         .def("set_requires_grad", &Tensor<T>::set_requires_grad, "Enable or disable gradient computation.")
         .def("to", &Tensor<T>::to, "Move the Tensor to another device.")
 
-        // Autograd interface
         .def("set_grad_fn", &Tensor<T>::set_grad_fn, "Attach a gradient function to this Tensor.")
         .def("get_grad_fn", &Tensor<T>::get_grad_fn, "Return the gradient function attached to this Tensor.")
         .def("set_grad",  &Tensor<T>::set_grad,
              "Set the gradient Tensor for this Tensor.")
         .def("get_grad_tensor", &Tensor<T>::get_grad_tensor, "Return the gradient Tensor of this Tensor.")
 
-        // Arithmetic operators
         .def("__add__", &Tensor<T>::operator+, "Element-wise addition.")
         .def("__sub__", (Tensor<T> (Tensor<T>::*)(const Tensor<T>&) const) &Tensor<T>::operator-, "Element-wise subtraction.")
         .def("__mul__", &Tensor<T>::operator*, "Element-wise multiplication.")
         .def("__truediv__", &Tensor<T>::operator/, "Element-wise division.")
         .def("__neg__", (Tensor<T> (Tensor<T>::*)() const) &Tensor<T>::operator-, "Negation of the Tensor.")
 
-        // Common operations
         .def("relu", &Tensor<T>::relu, "Apply ReLU activation.")
         .def("sigmoid", &Tensor<T>::sigmoid, "Apply Sigmoid activation.")
         .def("reshape", &Tensor<T>::reshape, "Reshape the Tensor to a new shape.")
@@ -70,7 +65,8 @@ void bind_function(py::module &m_func) {
         )doc")
         .def("forward", &Function<T>::forward, "Perform the forward pass.")
         .def("backward", &Function<T>::backward, "Compute gradients in the backward pass.")
-        .def("get_inputs", &Function<T>::get_inputs, "Return input Tensors of this Function.");
+        .def("get_inputs", &Function<T>::get_inputs, "Return input Tensors of this Function.")
+        .def("__call__" , (Tensor<T> (Function<T>::*)(const Tensor<T>&)) &Function<T>::operator() , "Forward pass through the function for only one input.");
 
     // Macro-like helper for subclasses
     #define BIND_FUNC(ClassName) \
@@ -128,6 +124,14 @@ void bind_module(py::module &m_mod) {
     py::class_<CrossEntropy<T>, Module<T>, std::shared_ptr<CrossEntropy<T>>>(m_mod, "CrossEntropy",
         "CrossEntropy loss function.")
         .def(py::init<const std::vector<size_t>&>(), py::arg("label_cache"));
+    
+    py::class_<ReLU<T> , Module<T> , std::shared_ptr<ReLU<T>>>(m_mod, "ReLU",
+        "ReLU activation module.")
+        .def(py::init<>());
+    
+    py::class_<Sigmoid<T> , Module<T> , std::shared_ptr<Sigmoid<T>>>(m_mod, "Sigmoid",
+        "Sigmoid activation module.")
+        .def(py::init<>());
 }
 
 
@@ -148,6 +152,18 @@ Tensor<T> tensor_from_numpy(py::array_t<float> data , Device device = Device::Cp
     return tensor;
 }
 template <typename T>
+py::array_t<float> numpy_from_tensor(const Tensor<T>& tensor)
+{
+    py::array_t<float> array(tensor.shape());
+    if(tensor.device() == Device::Cpu){
+        memcpy(array.mutable_data() , tensor.get() , sizeof(T) * tensor.size());
+    }
+    else if(tensor.device() == Device::Cuda){
+        cudaMemcpy(array.mutable_data() , tensor.get() , sizeof(T) * tensor.size() , cudaMemcpyDeviceToHost);
+    }
+    return array;
+}
+template <typename T>
 void bind_f(py::module & m){
          m.def("zeros", &zeros<T>, 
           py::arg("shape"), py::arg("device") = Device::Cpu, "Create tensor filled with 0");
@@ -162,6 +178,7 @@ void bind_f(py::module & m){
     m.def("full", &full<T>, 
           py::arg("shape"), py::arg("value"), py::arg("device") = Device::Cpu, "Create tensor filled with 'value'");
     m.def("tensor_from_numpy" , &tensor_from_numpy<T> , py::arg("data") , py::arg("device")=Device::Cpu , "Create tensor from numpy array.");
+    m.def("numpy_from_tensor" , &numpy_from_tensor<T> , py::arg("tensor") , "Create numpy array from tensor.");
 }
 
 // ========================== Module Registration ==========================

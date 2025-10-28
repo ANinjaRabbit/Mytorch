@@ -92,6 +92,12 @@ namespace nn{
                 virtual Tensor<T> forward(const std::vector<Tensor<T>> & inputs) = 0;
                 virtual std::vector<Tensor<T>> backward(const Tensor<T>& grad_output) = 0;
                 virtual std::vector<Tensor<T>> get_inputs() const = 0;
+                Tensor<T> operator()(const std::vector<Tensor<T>> & inputs){
+                    return forward(inputs);
+                }
+                Tensor<T> operator()(const Tensor<T> & input){
+                    return forward({input});
+                }
         };
 
 
@@ -709,9 +715,9 @@ namespace nn{
                                 for(int j = 0;j<single_input_shape[1];j++){
                                     size_t inputindex = (i * single_input_strides[1]) + (j * single_input_strides[0]);
                                     size_t resultindex = (i / kernel_shape_[0]) * single_output_shape[1] + (j / kernel_shape_[1]);
-                                    if(result.get()[resultindex] < input.get()[inputindex]){
-                                        result.get()[resultindex] = input.get()[inputindex];
-                                        mask.get()[resultindex] = inputindex;
+                                    if(result.get()[resultindex + outputoffset] < input.get()[inputindex + inputoffset]){
+                                        result.get()[resultindex + outputoffset] = input.get()[inputindex + inputoffset];
+                                        mask.get()[resultindex + outputoffset] = inputindex;
                                     }
                                 }
                             }
@@ -721,7 +727,6 @@ namespace nn{
                         result.set_requires_grad(true);
                         a = input;
                     }
-                    result.print();
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out){
@@ -1930,6 +1935,50 @@ namespace nn{
                 }
 
 
+    };
+    template <typename T>
+    class ReLU : public Module<T>{
+        private:
+            Tensor<T> input_cache;
+            std::shared_ptr<Functional::ReLUFunc<T>> relu_func;
+        public:
+            Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
+                if(input[0].requires_grad()){
+                    Tensor<T> result = relu_func->forward(input);
+                    result.set_grad_fn(relu_func);
+                    input_cache = input[0];
+                    return result;
+                }
+                return Functional::ReLUFunc<T>().forward(input);
+            }
+            std::vector<Tensor<T>> parameters() override{
+                return {};
+            }
+            std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
+                return relu_func->backward(grad_out);
+            }
+    };
+    template <typename T>
+    class Sigmoid : public Module<T>{
+        private:
+            Tensor<T> input_cache;
+            std::shared_ptr<Functional::SigmoidFunc<T>> sigmoid_func;
+        public:
+            Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
+                if(input[0].requires_grad()){
+                    Tensor<T> result = sigmoid_func->forward(input);
+                    result.set_grad_fn(sigmoid_func);
+                    input_cache = input[0];
+                    return result;
+                }
+                return Functional::SigmoidFunc<T>().forward(input);
+            }
+            std::vector<Tensor<T>> parameters() override{
+                return {};
+            }
+            std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
+                return sigmoid_func->backward(grad_out);
+            }
     };
 
 }

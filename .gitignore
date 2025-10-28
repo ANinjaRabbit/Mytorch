@@ -2,3 +2,5 @@ build/
 *.dll
 *.exe
 dlls/
+pybind11/
+mnist-data/
