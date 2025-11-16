@@ -1,5 +1,6 @@
 #include "nn.cuh"
 #include "tensor.cuh"
+#include "autograd.cuh"
 
 namespace mytorch{
     template class Tensor<float>;
@@ -138,6 +139,25 @@ namespace mytorch{
             return result;
         }
         return nn::Functional::Pool2dFunc<T>(kernel_shape).forward({*this});
+    }
+    template <typename T>
+    void Tensor<T>::backward(const Tensor<T> & grad_out) {
+        auto grad = grad_out.deepcopy();
+        if(grad_out.is_null()){
+            grad = ones<T>(this->shape() , this->device());
+        }
+        grad.to(this->device());
+        autograd::compute_gradients_of_variables(*this , grad);
+    }
+    template <typename T>
+    Tensor<T> Tensor<T>::sum(const size_t axis) const {
+        if(this->requires_grad()){
+            auto f =  std::make_shared<nn::Functional::SumFunc<T>>(axis);
+            Tensor<T> result = f->forward({*this});
+            result.set_grad_fn(f);
+            return result;
+        }
+        return nn::Functional::SumFunc<T>(axis).forward({*this});
     }
 
 

@@ -239,6 +239,7 @@ namespace nn{
                             result.get()[i] = inputs[0].get()[i] - inputs[1].get()[i];
                         }
                     }
+                    result.set_requires_grad(inputs[0].requires_grad() || inputs[1].requires_grad());
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_output) override{
@@ -448,6 +449,108 @@ namespace nn{
                 output[index] = 1.0 / (1.0 + std::exp(-input[index]));
             }
         }
+        template <typename T>
+        __global__ void _sum_forward_kernel(T * output , const T * input ,  const size_t reduce , const size_t inner){
+            size_t ridx = threadIdx.x;
+            size_t iidx = blockIdx.x % inner;
+            size_t oidx = blockIdx.x / inner;
+            extern __shared__ char smem[];
+            T * shared = reinterpret_cast<T *>(smem);
+            shared[ridx] = input[oidx * reduce * inner + ridx * inner + iidx];
+            __syncthreads();
+            for(int s = (reduce + 1) >> 1; s > 1; s = (s + 1) >> 1){
+                if(ridx + s < reduce ){
+                    shared[ridx] += shared[ridx + s];
+                }
+            }
+            if(ridx == 0){
+                output[oidx * inner + iidx] = shared[0] + (reduce > 1 ? shared[1] : 0);
+            }
+
+        }
+        template <typename T>
+        __global__ void _sum_backward_kernel(T * grad_in , const T * grad_out , const size_t reduce , const size_t inner){
+            size_t ridx = threadIdx.x;
+            size_t iidx = blockIdx.x % inner;
+            size_t oidx = blockIdx.x / inner;
+            grad_in[oidx * reduce * inner + ridx * inner + iidx] = grad_out[oidx * inner + iidx];
+        }
+        template <typename T>
+        class SumFunc : public Function<T>{
+            private :
+                Tensor<T> a;
+                size_t axis;
+            public:
+                SumFunc( const size_t axis) : axis(axis){}
+                Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+                    if(inputs.size() != 1){
+                        throw std::runtime_error("SumFunc error!");
+                    }
+                    if(inputs[0].requires_grad()){
+                        a = inputs[0];
+                    }
+                    auto input = inputs[0];
+                    std::vector<size_t> resultshape;
+                    auto inputshape = input.shape();
+                    for (int i = 0; i < inputshape.size(); i++){
+                        if(i != axis){
+                            resultshape.push_back(inputshape[i]);
+                        }
+                    }
+                    Tensor<T> result(resultshape , input.device());
+                    size_t indim = input.ndim();
+                    size_t reduce = inputshape[axis];
+                    size_t inner = 1;
+                    for(size_t i = axis + 1;i < indim;i++){
+                        inner *= inputshape[i];
+                    }
+                    if(input.device() == Cuda){
+                        _sum_forward_kernel<<< result.size() , reduce , reduce * sizeof(T)>>>(result.get() , input.get() , reduce , inner);
+                    }
+                    else{
+                        int outer = result.size() / inner;
+                        for(int o = 0;o < outer;o ++ ){
+                            for(int i = 0;i < inner; i++){
+                                T sum = 0;
+                                for(int r = 0;r < reduce;r++){
+                                    sum += input.get()[o * reduce * inner + r * inner + i];
+                                }
+                                result.get()[i + o * inner] = sum;
+                            }
+                        }
+                    }
+                    result.set_requires_grad(input.requires_grad());
+                    return result;
+                }
+                std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
+                    auto inputshape = a.shape();
+                    size_t indim = inputshape.size();
+                    Tensor<T> grad_in(inputshape , a.device());
+                    size_t reduce = inputshape[axis];
+                    size_t inner = 1;
+                    if(a.device() == Cuda){
+                        for(size_t i = axis + 1;i < indim;i++){
+                            inner *= inputshape[i];
+                        }
+                        _sum_backward_kernel<<< grad_out.size() , reduce , reduce * sizeof(T)>>>(grad_in.get() , grad_out.get() , reduce , inner);
+                    }
+                    else{
+                        size_t outer = grad_out.size() / inner;
+                        for(int o = 0;o < outer;o ++ ){
+                            for(int i = 0;i < inner; i++){
+                                for(int r = 0;r < reduce;r++){
+                                    grad_in.get()[o * reduce * inner + r * inner + i] = grad_out.get()[o * inner + i];
+                                }
+                            }
+                        }
+                    }
+                    return {grad_in};
+                }
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a};
+                }
+
+        };
 
         template <typename T>
         class SigmoidFunc : public Function<T>{
@@ -836,21 +939,23 @@ namespace nn{
                         cublasCreate(&handle);
                         float alpha = 1.0f;
                         float beta = 0.0f;
-                        for(int offset0 = 0 , offset1 = 0 , offsetresult = 0;offsetresult < result.size();offset0 += step0 , offset1 += step1 , offsetresult += stepresult){
-                            cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                resultshape[resultshape.size() - 1] , 
-                                resultshape[resultshape.size() - 2],
-                                input0shape[input0shape.size() - 1] , 
-                                &alpha , 
-                                input[1].get() + offset1 , 
-                                input1stride[1] , 
-                                input[0].get() + offset0 , 
-                                input0stride[1] , 
-                                &beta , 
-                                result.get() + offsetresult , 
-                                resultstride[1]
-                            );
-                        }
+                        cublasSgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                            resultshape[resultshape.size() - 1] , 
+                            resultshape[resultshape.size() - 2],
+                            input0shape[input0shape.size() - 1] , 
+                            &alpha , 
+                            input[1].get()  , 
+                            input1stride[1] , 
+                            step1,
+                            input[0].get()  , 
+                            input0stride[1] , 
+                            step0,
+                            &beta , 
+                            result.get()   , 
+                            resultstride[1],
+                            stepresult,
+                            result.size() / stepresult
+                        );
                         cublasDestroy(handle);
                     }
                     else{
@@ -940,6 +1045,23 @@ namespace nn{
                                 resultstride[1]
                             );
                         }
+                        cublasDgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                            resultshape[resultshape.size() - 1] , 
+                            resultshape[resultshape.size() - 2],
+                            input0shape[input0shape.size() - 1] , 
+                            &alpha , 
+                            input[1].get()  , 
+                            input1stride[1] , 
+                            step1,
+                            input[0].get()  , 
+                            input0stride[1] , 
+                            step0,
+                            &beta , 
+                            result.get()   , 
+                            resultstride[1],
+                            stepresult,
+                            result.size() / stepresult
+                        );
                         cublasDestroy(handle);
                     }
                     else{
@@ -990,6 +1112,14 @@ namespace nn{
             T sum = 0;
             for(int i = 0;i<a.size();i++){
                 sum += a[i] * b[i];
+            }
+            return sum;
+        }
+        template <typename T>
+        T rev_dot_vec(const std::vector<T> & a , const std::vector<T> & b){
+            T sum = 0;
+            for(int i = 0;i<a.size();i++){
+                sum += a[i] * b[a.size() - 1 - i];
             }
             return sum;
         }
@@ -1200,6 +1330,24 @@ namespace nn{
 
     }
     template <typename T>
+    void __cudaMemcpyBatch(T * dst , const T * src ,const size_t size , const size_t batch_size){
+        constexpr int streamCount = 8;
+        cudaStream_t streams[streamCount];
+
+        for(int i = 0;i<streamCount;i++){
+            CHECK(cudaStreamCreate(&streams[i]));
+        }
+        for(size_t b = 0;b < batch_size;b ++){
+            int s = b % streamCount;
+            cudaMemcpyAsync(dst + b * size, src , size * sizeof(T) , cudaMemcpyDeviceToDevice , streams[s]);
+
+        }
+        for(int i = 0;i < streamCount;i++){
+            CHECK(cudaStreamSynchronize(streams[i]));
+            CHECK(cudaStreamDestroy(streams[i]));
+        }
+    }
+    template <typename T>
     class Linear;
     template <typename T>
     __global__ void _linear_add(T * output , const T * input , size_t size){
@@ -1245,22 +1393,25 @@ namespace nn{
                     cublasCreate(&handle);
                     float alpha = 1.0f;
                     float beta = 1.0f;
-                    for(int  offset1 = 0 , offsetresult = 0;offsetresult < result.size(); offset1 += step1 , offsetresult += stepresult){
-                        CHECK(cudaMemcpy(result.get() + offsetresult , bias.get() ,sizeof(float) * bias.size() , cudaMemcpyDeviceToDevice));
-                        cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                            1 , 
-                            resultshape[resultshape.size() - 1],
-                            input0shape[input0shape.size() - 1] , 
-                            &alpha , 
-                            input.get() + offset1 , 
-                            1 , 
-                            weight.get() , 
-                            input0stride[1] , 
-                            &beta , 
-                            result.get() + offsetresult , 
-                            1
-                        );
-                    }
+                    __cudaMemcpyBatch(result.get() , bias.get() , stepresult , result.size() / stepresult);
+
+                    cublasSgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                        1,
+                        resultshape[resultshape.size() - 1],
+                        input0shape[input0shape.size() - 1],
+                        &alpha,
+                        input.get(),
+                        1,
+                        step1,
+                        weight.get(),
+                        input0stride[1],
+                        0,
+                        &beta,
+                        result.get(),
+                        1,
+                        stepresult,
+                        result.size() / stepresult
+                    );
                     cublasDestroy(handle);
                 }
                 else{
@@ -1290,25 +1441,19 @@ namespace nn{
                 Tensor<float> grad_input(input.shape() , input.device());
                 Tensor<float> grad_weight(weight.shape() , weight.device());
                 Tensor<float> grad_bias(bias.shape() , bias.device());
-                size_t stepinput = input.get_strides()[1];
-                size_t stepgradout = grad_out.get_strides()[1];
+                auto inputstrides = input.get_strides();
+                inputstrides.push_back(input.size());
+                auto gradoutstrides = grad_out.get_strides();
+                gradoutstrides.push_back(grad_out.size());
+                size_t stepinput = inputstrides[1];
+                size_t stepgradout = gradoutstrides[1];
                 if(input.device() == Cuda){
                     cublasHandle_t handle;
                     cublasCreate(&handle);
                     float alpha = 1.0f;
                     float beta = 1.0f;
                     for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
-                        cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_T,
-                            1 , input.shape().back() , grad_out.shape().back(),
-                            &alpha , 
-                            grad_out.get() + gradoutoffset,
-                            1 , 
-                            weight.get() , 
-                            weight.shape().back(),
-                            &beta,
-                            grad_input.get() + inputoffset,
-                            1
-                        );
+
                         cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N,
                             input.shape().back() ,  grad_out.shape().back(), 1,
                             &alpha , 
@@ -1326,6 +1471,22 @@ namespace nn{
                             grad_bias.size()
                         );
                     }
+
+                    cublasSgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_T,
+                        1, input.shape().back(), grad_out.shape().back(),
+                        &alpha,
+                        grad_out.get(),
+                        1,
+                        stepgradout,
+                        weight.get(),
+                        weight.shape().back(),
+                        0,
+                        &beta,
+                        grad_input.get(),
+                        1,
+                        stepinput,
+                        grad_out.size() / stepgradout
+                    );
                     cublasDestroy(handle);
 
                 }
@@ -1394,22 +1555,25 @@ namespace nn{
                     cublasCreate(&handle);
                     double alpha = 1.0f;
                     double beta = 1.0f;
-                    for(int  offset1 = 0 , offsetresult = 0;offsetresult < result.size(); offset1 += step1 , offsetresult += stepresult){
-                        CHECK(cudaMemcpy(result.get() + offsetresult , bias.get() ,sizeof(double) * bias.size() , cudaMemcpyDeviceToDevice));
-                        cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                            1 , 
-                            resultshape[resultshape.size() - 1],
-                            input0shape[input0shape.size() - 1] , 
-                            &alpha , 
-                            input.get() + offset1 , 
-                            1 , 
-                            weight.get() , 
-                            input0stride[1] , 
-                            &beta , 
-                            result.get() + offsetresult , 
-                            1
-                        );
-                    }
+                    __cudaMemcpyBatch(result.get() , bias.get() , stepresult , result.size() / stepresult);
+
+                    cublasDgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                        1,
+                        resultshape[resultshape.size() - 1],
+                        input0shape[input0shape.size() - 1],
+                        &alpha,
+                        input.get(),
+                        1,
+                        step1,
+                        weight.get(),
+                        input0stride[1],
+                        0,
+                        &beta,
+                        result.get(),
+                        1,
+                        stepresult,
+                        result.size() / stepresult
+                    );
                     cublasDestroy(handle);
                 }
                 else{
@@ -1433,15 +1597,83 @@ namespace nn{
                 return result;
             }
             std::vector<Tensor<double>> _internal_backward(const Tensor<double> & grad_out) override{
-                Tensor<double> grad_input(input_cache.shape() , input_cache.device());
-                grad_input.set_requires_grad(false);
-                auto grad_bias = grad_out;
-                grad_bias.set_requires_grad(false);
-                auto grad_weight = grad_out.expand(grad_out.shape().size()).matmul(input_cache.expand(input_cache.shape().size()).transpose());
-                grad_weight.set_requires_grad(false);
+                auto input = input_cache;
+                Tensor<double> grad_input(input.shape() , input.device());
+                Tensor<double> grad_weight(weight.shape() , weight.device());
+                Tensor<double> grad_bias(bias.shape() , bias.device());
+                auto inputstrides = input.get_strides();
+                inputstrides.push_back(input.size());
+                auto gradoutstrides = grad_out.get_strides();
+                gradoutstrides.push_back(grad_out.size());
+                size_t stepinput = inputstrides[1];
+                size_t stepgradout = gradoutstrides[1];
+                if(input.device() == Cuda){
+                    cublasHandle_t handle;
+                    cublasCreate(&handle);
+                    double alpha = 1.0f;
+                    double beta = 1.0f;
+                    for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
+
+                        cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N,
+                            input.shape().back() ,  grad_out.shape().back(), 1,
+                            &alpha , 
+                            input.get() + inputoffset , 
+                            1 , 
+                            grad_out.get() + gradoutoffset,
+                            1
+                            ,&beta , 
+                            grad_weight.get(),
+                            grad_weight.shape().back()
+                        );
+                        _linear_add<double><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum>>>(
+                            grad_bias.get() , 
+                            grad_out.get() + gradoutoffset , 
+                            grad_bias.size()
+                        );
+                    }
+
+                    cublasDgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_T,
+                        1, input.shape().back(), grad_out.shape().back(),
+                        &alpha,
+                        grad_out.get(),
+                        1,
+                        stepgradout,
+                        weight.get(),
+                        weight.shape().back(),
+                        0,
+                        &beta,
+                        grad_input.get(),
+                        1,
+                        stepinput,
+                        grad_out.size() / stepgradout
+                    );
+                    cublasDestroy(handle);
+
+                }
+                else{
+                    for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
+                        for(size_t i = 0;i<grad_bias.size();i++){
+                            grad_bias.get()[i] += grad_out.get()[gradoutoffset + i];
+                        }
+                        for(size_t i = 0;i< grad_input.shape().back();i++){
+                            for(size_t k = 0;k< grad_out.shape().back();k++){
+                                grad_input.get()[inputoffset + i] += weight.get()[i + k * grad_input.shape().back()] * 
+                                    grad_out.get()[gradoutoffset + k];
+                            }
+                        }
+                        for(size_t i = 0;i< grad_weight.shape()[grad_weight.ndim() - 2];i++){
+                            for(size_t j = 0;j< grad_weight.shape()[grad_weight.ndim() - 1];j++){
+                                grad_weight.get()[i * grad_weight.shape().back() + j] += 
+                                    grad_out.get()[gradoutoffset + i] * 
+                                    input.get()[inputoffset + j];
+                            }
+                        }
+                    }
+                }
                 weight.set_grad(grad_weight);
                 bias.set_grad(grad_bias);
-                return {weight.transpose().matmul(grad_out.expand(grad_out.shape().size())).reshape(input_cache.shape())};
+
+                return {grad_input};
             }
             std::vector<Tensor<double>> parameters() override{
                 return {weight , bias};
@@ -1942,6 +2174,7 @@ namespace nn{
             Tensor<T> input_cache;
             std::shared_ptr<Functional::ReLUFunc<T>> relu_func;
         public:
+            ReLU() : relu_func(std::make_shared<Functional::ReLUFunc<T>>()){}
             Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
                 if(input[0].requires_grad()){
                     Tensor<T> result = relu_func->forward(input);

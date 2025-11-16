@@ -50,6 +50,18 @@ void bind_tensor(py::module &m) {
         .def("expand", &Tensor<T>::expand, "Expand Tensor to a new shape (broadcasting).")
         .def("print", &Tensor<T>::print, "Print the Tensor contents.")
         .def("deepcopy", &Tensor<T>::deepcopy, "Return a deep copy of the Tensor.")
+        .def("backward",
+        [](Tensor<T>& self, py::object grad_obj) {
+            if (grad_obj.is_none()) {
+                self.backward(Tensor<T>());  
+            } else {
+                Tensor<T>& grad = grad_obj.cast<Tensor<T>&>();
+                self.backward(grad);
+            }
+        },
+        py::arg("grad_output") = py::none(),
+        "Compute gradients in the backward pass.")
+        .def("sum", &Tensor<T>::sum, "Sum all elements in the Tensor.")
         ;
 }
 
@@ -84,6 +96,7 @@ void bind_function(py::module &m_func) {
     BIND_FUNC(ReshapeFunc);
     BIND_FUNC(MatmulFunc);
     BIND_FUNC(ModuleFunctionWrapper);
+    BIND_FUNC(SumFunc);
 
     #undef BIND_FUNC
 }
@@ -132,6 +145,7 @@ void bind_module(py::module &m_mod) {
     py::class_<Sigmoid<T> , Module<T> , std::shared_ptr<Sigmoid<T>>>(m_mod, "Sigmoid",
         "Sigmoid activation module.")
         .def(py::init<>());
+    
 }
 
 
