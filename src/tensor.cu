@@ -6,6 +6,8 @@ namespace mytorch{
     template class Tensor<float>;
     template class Tensor<double>;
 
+    Device DefaultDevice = Cpu;
+
 
     template <typename T>
     Tensor<T> Tensor<T>::operator+(const Tensor<T>& other) const {

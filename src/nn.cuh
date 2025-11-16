@@ -13,7 +13,9 @@ namespace nn{
         public:
             
             Module() = default;
-            virtual Tensor<T> forward(const std::vector<Tensor<T>> & input) = 0;
+            virtual Tensor<T> forward(const std::vector<Tensor<T>> & input){
+                return Tensor<T>();
+            }
             Tensor<T> operator()(const std::vector<Tensor<T>> & input){
                 return forward(input);
             }
@@ -23,7 +25,7 @@ namespace nn{
             virtual std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out){
                 return {}; // default no backward
             }
-            virtual std::vector<Tensor<T>> parameters() = 0;
+            virtual std::vector<Tensor<T>> parameters(){return {};};
     };
 
     
@@ -89,13 +91,19 @@ namespace nn{
         class Function{
             public:
                 virtual ~Function() = default;
-                virtual Tensor<T> forward(const std::vector<Tensor<T>> & inputs) = 0;
-                virtual std::vector<Tensor<T>> backward(const Tensor<T>& grad_output) = 0;
-                virtual std::vector<Tensor<T>> get_inputs() const = 0;
-                Tensor<T> operator()(const std::vector<Tensor<T>> & inputs){
+                virtual Tensor<T> forward(const std::vector<Tensor<T>> & inputs){
+                    return Tensor<T>();
+                };
+                virtual std::vector<Tensor<T>> backward(const Tensor<T>& grad_output){
+                    return {};
+                }
+                virtual std::vector<Tensor<T>> get_inputs() const{
+                    return {};
+                }
+                virtual Tensor<T> operator()(const std::vector<Tensor<T>> & inputs){
                     return forward(inputs);
                 }
-                Tensor<T> operator()(const Tensor<T> & input){
+                virtual Tensor<T> operator()(const Tensor<T> & input){
                     return forward({input});
                 }
         };

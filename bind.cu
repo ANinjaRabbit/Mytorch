@@ -44,7 +44,16 @@ void bind_tensor(py::module &m) {
         .def("relu", &Tensor<T>::relu, "Apply ReLU activation.")
         .def("sigmoid", &Tensor<T>::sigmoid, "Apply Sigmoid activation.")
         .def("reshape", &Tensor<T>::reshape, "Reshape the Tensor to a new shape.")
-        .def("transpose", &Tensor<T>::transpose, "Transpose Tensor dimensions.")
+        .def("transpose",
+            [](Tensor<T>& self, py::object perm_obj) {
+                if (perm_obj.is_none()) {
+                    return self.transpose({});  
+                } else {
+                    std::vector<size_t> perm = perm_obj.cast<std::vector<size_t>>();
+                    return self.transpose(perm);
+                }
+            }
+             , py::arg("perm") = py::none(), "Transpose Tensor dimensions.")
         .def("matmul", &Tensor<T>::matmul, "Matrix multiplication.")
         .def("pool2d", &Tensor<T>::pool2d, "2D pooling operation.")
         .def("expand", &Tensor<T>::expand, "Expand Tensor to a new shape (broadcasting).")
@@ -75,6 +84,7 @@ void bind_function(py::module &m_func) {
         Base class for differentiable operations in the computation graph.
         Each Function defines forward() and backward() for autograd.
         )doc")
+        .def(py::init<>())
         .def("forward", &Function<T>::forward, "Perform the forward pass.")
         .def("backward", &Function<T>::backward, "Compute gradients in the backward pass.")
         .def("get_inputs", &Function<T>::get_inputs, "Return input Tensors of this Function.")
@@ -111,6 +121,7 @@ void bind_module(py::module &m_mod) {
         Base class for neural network layers (modules).
         Each Module defines forward() and parameters(), and may override backward().
         )doc")
+        .def(py::init<>())
         .def("forward", &Module<T>::forward, "Forward pass through the module.")
         .def("_internal_backward", &Module<T>::_internal_backward, "Backward pass (computes parameter gradients).")
         .def("parameters", &Module<T>::parameters, "Return a list of learnable parameters.")
@@ -179,21 +190,71 @@ py::array_t<float> numpy_from_tensor(const Tensor<T>& tensor)
 }
 template <typename T>
 void bind_f(py::module & m){
-         m.def("zeros", &zeros<T>, 
-          py::arg("shape"), py::arg("device") = Device::Cpu, "Create tensor filled with 0");
-    m.def("ones", &ones<T>, 
-          py::arg("shape"), py::arg("device") = Device::Cpu, "Create tensor filled with 1");
-    m.def("arange", &arange<T>, 
-          py::arg("start"), py::arg("end"), py::arg("step") = T(1), py::arg("device") = Device::Cpu, "Create tensor with range [start, end) step");
-    m.def("rand", &rand<float>, 
-          py::arg("shape"), py::arg("device") = Device::Cpu, "Create tensor with random values (0~1)");
-    m.def("randn", &randn<T>, 
-          py::arg("shape"), py::arg("device") = Device::Cpu, "Create tensor with normal distribution (mean=0, std=1)");
-    m.def("full", &full<T>, 
-          py::arg("shape"), py::arg("value"), py::arg("device") = Device::Cpu, "Create tensor filled with 'value'");
-    m.def("tensor_from_numpy" , &tensor_from_numpy<T> , py::arg("data") , py::arg("device")=Device::Cpu , "Create tensor from numpy array.");
-    m.def("numpy_from_tensor" , &numpy_from_tensor<T> , py::arg("tensor") , "Create numpy array from tensor.");
+
+    m.def("zeros",
+        [](const std::vector<size_t>& shape, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return zeros<T>(shape, dev);
+        },
+        py::arg("shape"), py::arg("device") = py::none(),
+        "Create tensor filled with 0");
+
+    m.def("ones",
+        [](const std::vector<size_t>& shape, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return ones<T>(shape, dev);
+        },
+        py::arg("shape"), py::arg("device") = py::none(),
+        "Create tensor filled with 1");
+
+    m.def("arange",
+        [](T start, T end, T step, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return arange<T>(start, end, step, dev);
+        },
+        py::arg("start"), py::arg("end"),
+        py::arg("step") = T(1),
+        py::arg("device") = py::none(),
+        "Create tensor with range [start, end)");
+
+    m.def("rand",
+        [](const std::vector<size_t>& shape, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return rand<T>(shape, dev);
+        },
+        py::arg("shape"), py::arg("device") = py::none(),
+        "Create uniform random tensor");
+
+    m.def("randn",
+        [](const std::vector<size_t>& shape, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return randn<T>(shape, dev);
+        },
+        py::arg("shape"), py::arg("device") = py::none(),
+        "Create normal random tensor");
+
+    m.def("full",
+        [](const std::vector<size_t>& shape, T value, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return full<T>(shape, value, dev);
+        },
+        py::arg("shape"), py::arg("value"),
+        py::arg("device") = py::none(),
+        "Create tensor filled with value");
+
+    m.def("tensor_from_numpy",
+        [](py::array_t<float> data, py::object dev_obj) {
+            Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+            return tensor_from_numpy<T>(data, dev);
+        },
+        py::arg("data"), py::arg("device") = py::none(),
+        "Create tensor from numpy array.");
+
+    m.def("numpy_from_tensor", &numpy_from_tensor<T>,
+        py::arg("tensor"),
+        "Create numpy array from tensor.");
 }
+
 
 // ========================== Module Registration ==========================
 PYBIND11_MODULE(mytorch, m) {
@@ -207,6 +268,15 @@ PYBIND11_MODULE(mytorch, m) {
     // Submodules
     auto m_func = m.def_submodule("Functional", "Autograd function definitions.");
     auto m_mod = m.def_submodule("nn", "Neural network modules.");
+
+    m.def("get_default_device", []() {
+        return DefaultDevice;
+    });
+
+    m.def("set_default_device", [](Device d) {
+        DefaultDevice = d;
+    });
+    
 
     // Bind core components
     bind_tensor<float>(m);
