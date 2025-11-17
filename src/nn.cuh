@@ -671,12 +671,107 @@ namespace nn{
 
 
         template <typename T>
+        __global__ void _transpose_forward_kernel_2dim(T * result ,const T *  input  , const size_t m, const size_t n){
+            extern __shared__ char smem[];
+            T * tilem = reinterpret_cast<T *>(smem);
+            size_t idx[2];
+            idx[0] = threadIdx.x + kCudaTransposeTileSize * blockIdx.x; // n
+            idx[1] = threadIdx.y + kCudaTransposeTileSize * blockIdx.y; // m
+            size_t index = idx[0] + idx[1] * n;
+            if(idx[0] < n && idx[1] < m){
+                tilem[threadIdx.y + threadIdx.x * kCudaTransposeTileSize] = input[index];
+            }
+            __syncthreads();
+            idx[0] = threadIdx.x + kCudaTransposeTileSize * blockIdx.y; // m
+            idx[1] = threadIdx.y + kCudaTransposeTileSize * blockIdx.x; // n
+            index = idx[0] + idx[1] * m;
+            if(idx[0] < m && idx[1] < n){
+                result[index] = tilem[threadIdx.y * kCudaTransposeTileSize + threadIdx.x];
+            }
+        }
+
+        template <typename T>
+        __global__ void _transpose_forward_kernel_HWC2CHW(T * result, const T * input , const size_t h , const size_t w , const size_t c){
+            extern __shared__ char smem[];
+            T * tilem = reinterpret_cast<T *>(smem);
+            size_t idx[3];
+            idx[0] = threadIdx.x + kCudaTransposeTileSize * blockIdx.x; // c
+            idx[1] = threadIdx.y + kCudaTransposeTileSize * blockIdx.y; // w
+            idx[2] = threadIdx.z + kCudaTransposeTileSize * blockIdx.z; // h
+            size_t index = idx[0] + idx[1] * c + idx[2] * w * c;
+            if(idx[0] < c && idx[1] < w && idx[2] < h){
+                tilem[threadIdx.y + threadIdx.z * kCudaTransposeTileSize + threadIdx.x * kCudaTransposeTileSize * kCudaTransposeTileSize] = input[index];
+            }
+            __syncthreads();
+            idx[0] = threadIdx.x + blockIdx.y * kCudaTransposeTileSize; // w
+            idx[1] = threadIdx.y + blockIdx.z * kCudaTransposeTileSize; // h
+            idx[2] = threadIdx.z + blockIdx.x * kCudaTransposeTileSize; // c
+            index = idx[0] + w * idx[1] + w * h * idx[2];
+            if(idx[0] < w && idx[1] < h && idx[2] < c){
+                result[index] = tilem[threadIdx.x + threadIdx.y * kCudaTransposeTileSize + threadIdx.z * kCudaTransposeTileSize * kCudaTransposeTileSize];
+            }
+
+        }
+        template <typename T>
+        __global__ void _transpose_forward_kernel_CHW2HWC(T * result, const T * input , const size_t c , const size_t h , const size_t w){
+            extern __shared__ char smem[];
+            T * tilem = reinterpret_cast<T *>(smem);
+            size_t idx[3];
+            idx[0] = threadIdx.x + kCudaTransposeTileSize * blockIdx.x; // w
+            idx[1] = threadIdx.y + kCudaTransposeTileSize * blockIdx.y; // h
+            idx[2] = threadIdx.z + kCudaTransposeTileSize * blockIdx.z; // c
+            size_t index = idx[0] + idx[1] * w + idx[2] * w * h;
+            if(idx[0] < w && idx[1] < h && idx[2] < c){
+                tilem[threadIdx.z + threadIdx.x * kCudaTransposeTileSize + threadIdx.y * kCudaTransposeTileSize * kCudaTransposeTileSize] = input[index];
+            }
+            __syncthreads();
+            idx[0] = threadIdx.x + blockIdx.z * kCudaTransposeTileSize; // c
+            idx[1] = threadIdx.y + blockIdx.x * kCudaTransposeTileSize; // w
+            idx[2] = threadIdx.z + blockIdx.y * kCudaTransposeTileSize; // h
+            index = idx[0] + idx[1] * c + idx[2] * c * w;
+            if(idx[0] < c && idx[1] < w && idx[2] < h){
+                result[index] = tilem[threadIdx.x + threadIdx.y * kCudaTransposeTileSize + threadIdx.z * kCudaTransposeTileSize * kCudaTransposeTileSize];
+            }
+
+        }
+
+
+
+
+        template <typename T>
         class TransposeFunc : public Function<T>{
             private:
                 std::vector<size_t> perm;
                 Tensor<T> a;
+                enum TransposeType{
+                    TLast2Dim,
+                    THWC2CHW,
+                    TCHW2HWC,
+                    TGeneral
+                };
+                TransposeType ttype;
+
             public:
-                TransposeFunc(const std::vector<size_t> & perm) : perm(perm){}
+                TransposeFunc(const std::vector<size_t> & perm) : perm(perm){
+                    size_t eq_count = 0;
+                    for(eq_count = 0;eq_count<perm.size() ;eq_count++){
+                        if(perm[eq_count] != eq_count){
+                            break;
+                        }
+                    }
+                    if(eq_count == perm.size() - 2 && perm.back() == perm.size() - 2){
+                        ttype = TLast2Dim;
+                    }
+                    else if(eq_count == perm.size() - 3 && perm.back() == perm.size() - 2 && perm[eq_count] == perm.size() - 1){
+                        ttype = THWC2CHW;
+                    }
+                    else if(eq_count == perm.size() - 3 && perm.back() == eq_count && perm[eq_count] == perm.size() - 2){
+                        ttype = TCHW2HWC;
+                    }
+                    else{
+                        ttype = TGeneral;
+                    }
+                }
                 Tensor<T> forward(const std::vector<Tensor<T>> & input ) override{
                     if(input.size() != 1)
                         throw std::runtime_error("TransposeFunc error!");
@@ -687,21 +782,128 @@ namespace nn{
                     Tensor<T> result(newshape , input[0].device());
                     result.set_requires_grad(input[0].requires_grad());
                     if(result.device() == Cuda){
-                        std::vector<size_t> revperm = _get_reverse_perm(perm);
-                        size_t totalthreads = 1;
-                        for(int i = 0;i < input[0].shape().size();i++){
-                            totalthreads *= divroundup(input[0].shape()[i] , kCudaTransposeTileSize);
+                        if(ttype == TLast2Dim){
+                            constexpr int streamCount = 8;
+                            cudaStream_t streams[streamCount];
+
+                            for(int i = 0;i<streamCount;i++){
+                                CHECK(cudaStreamCreate(&streams[i]));
+                            }
+
+                            size_t ndim = input[0].shape().size();
+                            size_t m = input[0].shape()[ndim - 2];
+                            size_t n = input[0].shape()[ndim - 1];
+                            size_t batchstep = m * n;
+                            size_t batch_size = input[0].size()/ batchstep;
+
+                            dim3 grid_size(divroundup(n , kCudaTransposeTileSize) , divroundup(m , kCudaTransposeTileSize));
+                            dim3 block_size(kCudaTransposeTileSize , kCudaTransposeTileSize);
+
+
+                            for(size_t b = 0;b < batch_size;b ++){
+                                int s = b % streamCount;
+                                _transpose_forward_kernel_2dim
+                                <<<grid_size , block_size , sizeof(T) * kCudaTransposeTileSize * kCudaTransposeTileSize , streams[s]>>>
+                                (
+                                    result.get() + b * batchstep,
+                                    input[0].get() + b * batchstep,
+                                    m , n
+                                );
+
+                            }
+                            for(int i = 0;i < streamCount;i++){
+                                CHECK(cudaStreamSynchronize(streams[i]));
+                                CHECK(cudaStreamDestroy(streams[i]));
+                            }
                         }
-                        size_t tilesize = (1 << (2 * input[0].shape().size()));
-                        cuda_shared_pointer<size_t> shape(input[0].shape() , Cuda);
-                        cuda_shared_pointer<size_t> outstrides(result.get_strides() , Cuda);
-                        cuda_shared_pointer<size_t> instrides(input[0].get_strides() , Cuda);
-                        cuda_shared_pointer<size_t> cuperm(perm , Cuda);
-                        cuda_shared_pointer<size_t> curevperm(revperm , Cuda);
+                        else if(ttype == THWC2CHW){
+                            constexpr int streamCount = 8;
+                            cudaStream_t streams[streamCount];
 
-                        _transpose_forward_kernel<<<totalthreads , tilesize , sizeof(T) * tilesize>>>(result.get() , input[0].get() , 
-                            result.size() , shape.size() , shape.get() , instrides.get() , outstrides.get() , cuperm.get() , curevperm.get());
+                            for(int i = 0;i<streamCount;i++){
+                                CHECK(cudaStreamCreate(&streams[i]));
+                            }
 
+                            size_t ndim = input[0].shape().size();
+                            size_t h = input[0].shape()[ndim - 3];
+                            size_t w = input[0].shape()[ndim - 2];
+                            size_t c = input[0].shape()[ndim - 1];
+                            size_t batchstep = h * w * c;
+                            size_t batch_size = input[0].size()/ batchstep;
+
+                            dim3 grid_size(divroundup(c , kCudaTransposeTileSize) , divroundup(w , kCudaTransposeTileSize) , divroundup(h , kCudaTransposeTileSize));
+                            dim3 block_size(kCudaTransposeTileSize , kCudaTransposeTileSize , kCudaTransposeTileSize );
+
+
+                            for(size_t b = 0;b < batch_size;b ++){
+                                int s = b % streamCount;
+                                _transpose_forward_kernel_HWC2CHW
+                                <<<grid_size , block_size , sizeof(T) * kCudaTransposeTileSize * kCudaTransposeTileSize * kCudaTransposeTileSize , streams[s]>>>
+                                (
+                                    result.get() + b * batchstep,
+                                    input[0].get() + b * batchstep,
+                                    h , w , c
+                                );
+
+                            }
+                            for(int i = 0;i < streamCount;i++){
+                                CHECK(cudaStreamSynchronize(streams[i]));
+                                CHECK(cudaStreamDestroy(streams[i]));
+                            }
+                        }
+                        else if(ttype == TCHW2HWC){
+                            constexpr int streamCount = 8;
+                            cudaStream_t streams[streamCount];
+
+                            for(int i = 0;i<streamCount;i++){
+                                CHECK(cudaStreamCreate(&streams[i]));
+                            }
+
+                            size_t ndim = input[0].shape().size();
+                            size_t c = input[0].shape()[ndim - 3];
+                            size_t h = input[0].shape()[ndim - 2];
+                            size_t w = input[0].shape()[ndim - 1];
+                            size_t batchstep = h * w * c;
+                            size_t batch_size = input[0].size()/ batchstep;
+
+                            dim3 grid_size(divroundup(w , kCudaTransposeTileSize) , divroundup(h , kCudaTransposeTileSize) , divroundup(c , kCudaTransposeTileSize));
+                            dim3 block_size(kCudaTransposeTileSize , kCudaTransposeTileSize , kCudaTransposeTileSize );
+
+
+                            for(size_t b = 0;b < batch_size;b ++){
+                                int s = b % streamCount;
+                                _transpose_forward_kernel_CHW2HWC
+                                <<<grid_size , block_size , sizeof(T) * kCudaTransposeTileSize * kCudaTransposeTileSize * kCudaTransposeTileSize , streams[s]>>>
+                                (
+                                    result.get() + b * batchstep,
+                                    input[0].get() + b * batchstep,
+                                    c , h , w
+                                );
+
+                            }
+                            for(int i = 0;i < streamCount;i++){
+                                CHECK(cudaStreamSynchronize(streams[i]));
+                                CHECK(cudaStreamDestroy(streams[i]));
+                            }
+                        }
+                        else{
+                            std::vector<size_t> revperm = _get_reverse_perm(perm);
+                            size_t totalthreads = 1;
+                            for(int i = 0;i < input[0].shape().size();i++){
+                                totalthreads *= divroundup(input[0].shape()[i] , kCudaTransposeTileSize);
+                            }
+                            size_t tilesize = (1 << (2 * input[0].shape().size()));
+                            cuda_shared_pointer<size_t> shape(input[0].shape() , Cuda);
+                            cuda_shared_pointer<size_t> outstrides(result.get_strides() , Cuda);
+                            cuda_shared_pointer<size_t> instrides(input[0].get_strides() , Cuda);
+                            cuda_shared_pointer<size_t> cuperm(perm , Cuda);
+                            cuda_shared_pointer<size_t> curevperm(revperm , Cuda);
+
+                            _transpose_forward_kernel<<<totalthreads , tilesize , sizeof(T) * tilesize>>>(result.get() , input[0].get() , 
+                                result.size() , shape.size() , shape.get() , instrides.get() , outstrides.get() , cuperm.get() , curevperm.get());
+
+
+                            }
                         return result;
                     }
                     else{
