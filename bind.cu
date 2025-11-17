@@ -133,9 +133,16 @@ void bind_module(py::module &m_mod) {
         "Fully connected layer: y = xW^T + b.")
         .def(py::init<const Tensor<T>&, const Tensor<T>&>(), py::arg("weight"), py::arg("bias"));
 
-    py::class_<Conv<T>, Module<T>, std::shared_ptr<Conv<T>>>(m_mod, "Conv",
-        "Convolutional layer using a learnable kernel.")
-        .def(py::init<const Tensor<T>&>(), py::arg("kernel"));
+        py::class_<Conv<T>, Module<T>, std::shared_ptr<Conv<T>>>(m_mod, "Conv",
+            "Convolutional layer using a learnable kernel.")
+        .def(py::init([](const Tensor<T>& kernel, py::object padding_mode_obj) {
+            PaddingMode padding_mode = padding_mode_obj.is_none() ? PaddingMode::ZeroPadding : padding_mode_obj.cast<PaddingMode>();
+            return std::make_shared<Conv<T>>(kernel, padding_mode);
+        }),
+        py::arg("kernel"),
+        py::arg("padding_mode") = py::none()
+    );
+
 
     py::class_<Pool2d<T>, Module<T>, std::shared_ptr<Pool2d<T>>>(m_mod, "Pool2d",
         "2D pooling layer (e.g., max pooling).")
@@ -268,6 +275,11 @@ PYBIND11_MODULE(mytorch, m) {
     // Submodules
     auto m_func = m.def_submodule("Functional", "Autograd function definitions.");
     auto m_mod = m.def_submodule("nn", "Neural network modules.");
+
+    py::enum_<nn::PaddingMode>(m_mod, "PaddingMode")
+        .value("NoPadding", nn::PaddingMode::NoPadding)
+        .value("ZeroPadding", nn::PaddingMode::ZeroPadding)
+        .export_values();
 
     m.def("get_default_device", []() {
         return DefaultDevice;
