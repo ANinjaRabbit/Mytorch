@@ -807,8 +807,8 @@ namespace nn{
                     cuda_shared_pointer<size_t> single_output_shape_cuda(single_output_shape , input.device());
                     cuda_shared_pointer<size_t> single_input_strides_cuda(single_input_strides , input.device());
                     cuda_shared_pointer<size_t> single_input_shape_cuda(single_input_shape , input.device());
-                    for(size_t inputoffset = 0 , outputoffset = 0;inputoffset < input.size();inputoffset += inputstep , outputoffset += resultstep){
-                        if(result.device() == Cuda){
+                    if(result.device() == Cuda){
+                        for(size_t inputoffset = 0 , outputoffset = 0;inputoffset < input.size();inputoffset += inputstep , outputoffset += resultstep){
                             _pool_forward_kernel<T><<<CudaGetBlocks(resultstep) , kCudaThreadsNum>>>(
                                 result.get() + outputoffset ,
                                 input.get() + inputoffset , 
@@ -821,9 +821,12 @@ namespace nn{
                                 single_input_strides_cuda.get()
                             );
                         }
-                        else{
-                            for(size_t i = 0;i<single_input_shape[0];i++){
-                                for(int j = 0;j<single_input_shape[1];j++){
+                    }
+                    else{
+
+                        for(size_t inputoffset = 0 , outputoffset = 0;inputoffset < input.size();inputoffset += inputstep , outputoffset += resultstep){
+                            for(size_t i = 0;i<single_output_shape[0] * kernel_shape_[0];i++){
+                                for(int j = 0;j<single_output_shape[1] * kernel_shape_[1];j++){
                                     size_t inputindex = (i * single_input_strides[1]) + (j * single_input_strides[0]);
                                     size_t resultindex = (i / kernel_shape_[0]) * single_output_shape[1] + (j / kernel_shape_[1]);
                                     if(result.get()[resultindex + outputoffset] < input.get()[inputindex + inputoffset]){
@@ -853,15 +856,17 @@ namespace nn{
                     std::vector<size_t> single_input_strides(inputstrides.begin() , inputstrides.begin() + 2);
 
                     size_t single_output_size = prod_vec(single_output_shape);
-                    for(size_t inputoffset = 0 , outputoffset = 0;inputoffset < input.size();inputoffset += inputstep , outputoffset += resultstep){
-                        if(grad_in.device() == Cuda){
+                    if(grad_in.device() == Cuda){
+                        for(size_t inputoffset = 0 , outputoffset = 0;inputoffset < input.size();inputoffset += inputstep , outputoffset += resultstep){
                             _pool_backward_kernel<T><<<CudaGetBlocks(resultstep) , kCudaThreadsNum>>>(
                                 grad_in.get() + inputoffset,grad_out.get() + outputoffset,
                                 mask.get() + outputoffset,
                                 single_output_size
                             );
                         }
-                        else{
+                    }
+                    else{
+                        for(size_t inputoffset = 0 , outputoffset = 0;inputoffset < input.size();inputoffset += inputstep , outputoffset += resultstep){
                             for(size_t i = 0;i<single_output_shape[0];i++){
                                 for(size_t j = 0;j<single_output_shape[1];j++){
                                     size_t inputindex = mask.get()[outputoffset + i * single_output_shape[1] + j];
@@ -869,6 +874,7 @@ namespace nn{
                                 }
                             }
                         }
+
                     }
 
                     return {grad_in};
@@ -1174,6 +1180,49 @@ namespace nn{
 
             }
         }
+        template<typename T>
+        __global__ void im2col_gpu_t(T * col , const T * im , const size_t kernel_size , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape , const size_t imsize){
+            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
+            if(index < imsize){
+                size_t imidx[kCudaMultiDimMax];
+                for(int i = 0 , index_ = index;i<ndim;i++){
+                    imidx[i] = index_ % imshape[ndim - i - 1];
+                    index_ /= imshape[ndim - i - 1];
+                }
+                size_t grid_min[kCudaMultiDimMax];
+                for(int i = 0;i<ndim;i++){
+                    grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
+                }
+                CudaMultiDimIndex grid_index(kernel_shape , ndim);
+                do{
+                    bool is_valid = true;
+                    size_t kernel_index[kCudaMultiDimMax];
+                    for(int i = 0;i<ndim;i++){
+                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
+                        if( kernel_index[i] >= imshape[i]){
+                            is_valid = false;
+                            break;
+                        }
+                    }
+                    if(is_valid){
+                        size_t im_offset = 0;
+                        size_t grid_offset =  0;
+                        for(int i = 0;i<ndim;i++){
+                            im_offset *= imshape[i];
+                            im_offset += kernel_index[i];
+                            grid_offset *= kernel_shape[i];
+                            grid_offset += grid_index.get_index()[i];
+                        }
+                        size_t col_offset = index + grid_offset * imsize;
+                        col[col_offset] =  im[im_offset];
+                    }
+                    grid_index.next();
+
+                }while(!grid_index.is_zero());
+
+            }
+        }
+
 
 
         template <typename T>
@@ -1403,6 +1452,8 @@ namespace nn{
                     float beta = 1.0f;
                     __cudaMemcpyBatch(result.get() , bias.get() , stepresult , result.size() / stepresult);
 
+                    auto batch_size = result.size() / stepresult;
+
                     cublasSgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                         1,
                         resultshape[resultshape.size() - 1],
@@ -1418,9 +1469,11 @@ namespace nn{
                         result.get(),
                         1,
                         stepresult,
-                        result.size() / stepresult
+                        batch_size
                     );
+
                     cublasDestroy(handle);
+
                 }
                 else{
                     weight.to(Cpu);
@@ -1460,27 +1513,42 @@ namespace nn{
                     cublasCreate(&handle);
                     float alpha = 1.0f;
                     float beta = 1.0f;
-                    for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
 
-                        cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N,
-                            input.shape().back() ,  grad_out.shape().back(), 1,
-                            &alpha , 
-                            input.get() + inputoffset , 
-                            1 , 
-                            grad_out.get() + gradoutoffset,
-                            1
-                            ,&beta , 
-                            grad_weight.get(),
-                            grad_weight.shape().back()
-                        );
-                        _linear_add<float><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum>>>(
+                    cudaStream_t stream_gemm,stream_add;
+                    cudaStreamCreate(&stream_gemm);
+                    cudaStreamCreate(&stream_add);
+
+
+                    for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
+                        
+                        cublasSetStream(handle , stream_gemm);
+                        CHECK_CUBLAS(
+                            cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                                input.shape().back() ,  grad_out.shape().back(), 1,
+                                &alpha , 
+                                input.get() + inputoffset , 
+                                input.shape().back(),
+                                grad_out.get() + gradoutoffset,
+                                1
+                                ,&beta , 
+                                grad_weight.get(),
+                                grad_weight.shape().back()
+                            ));
+
+                        
+
+
+                        _linear_add<float><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum , 0 , stream_add>>>(
                             grad_bias.get() , 
                             grad_out.get() + gradoutoffset , 
                             grad_bias.size()
                         );
+
                     }
 
-                    cublasSgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_T,
+                    
+                    auto batch_size = grad_out.size() / stepgradout;
+                    cublasSgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_N,
                         1, input.shape().back(), grad_out.shape().back(),
                         &alpha,
                         grad_out.get(),
@@ -1491,10 +1559,12 @@ namespace nn{
                         0,
                         &beta,
                         grad_input.get(),
-                        1,
+                        input.shape().back(),
                         stepinput,
-                        grad_out.size() / stepgradout
+                        batch_size
                     );
+                    CHECK(cudaStreamDestroy(stream_add));
+                    CHECK(cudaStreamDestroy(stream_gemm));
                     cublasDestroy(handle);
 
                 }
@@ -1721,37 +1791,123 @@ namespace nn{
                 std::vector<size_t> single_input_shape(input.shape().begin()+2 , input.shape().end());
                 std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
                 std::vector<size_t> single_output_stride(resultstride.begin() , resultstride.end() - 2);
-                for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                    ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                        for(size_t resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                if(result.device() == Cuda){
+                    //ready for pipeline
+                    cublasHandle_t handle;
+                    cublasCreate(&handle);
+                    cudaStream_t stream_im2col, stream_gemm;
+                    cudaStreamCreate(&stream_im2col);
+                    cudaStreamCreate(&stream_gemm);
+
+                    cudaEvent_t ev[2];
+                    cudaEventCreate(&ev[0]);
+                    cudaEventCreate(&ev[1]);
+
+                    float * im2col_buf[2];
+
+                    auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                    size_t single_input_size = Functional::prod_vec(single_input_shape);
+                    size_t im2col_size = single_input_size * single_kernel_size * sizeof(float);
+
+                    CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                    CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+
+                    float alpha = 1.0f;
+                    float beta = 1.0f;
+
+                    size_t iter = 0;
+
+                    //preprocessing
+                    auto half_kernel_shape = single_kernel_shape;
+                    auto instride = single_input_stride;
+                    auto revinstride = instride;
+                    std::reverse(revinstride.begin() , revinstride.end());
+                    for(int i = 0;i<half_kernel_shape.size();i++){
+                        half_kernel_shape[i] /= 2;
+                    }
+                    std::vector<size_t> kernel_stride = {};
+                    size_t kernel_stride_ = 1;
+                    for(int i = 0;i<single_kernel_shape.size();i++){
+                        kernel_stride.push_back(kernel_stride_);
+                        kernel_stride_ *= single_kernel_shape[single_kernel_shape.size() - 1 - i];
+                    }
+                    cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
+                    cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
+                    size_t inputbatchoffset , resultbatchoffset , resultoutoffset , kerneloutoffset , inputinoffset , kernelinoffset;
+                    size_t prev_kerneloutoffset , prev_kernelinoffset , prev_resultoutoffset , prev_resultbatchoffset;
+                    for(inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
+                        for(resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
                             ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    Tensor<float> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                    Functional::im2col_ptr<float>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
-                                     ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
-                                    if(result.device() == Cuda){
-                                        cublasHandle_t handle;
-                                        cublasCreate(&handle);
-                                        float alpha = 1.0f;
-                                        float beta = 1.0f;
-                                        cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                            1 , 
-                                            inputstride[input.ndim() - 2],
-                                            kernelstride[kernelstride.size() - 2], 
-                                            &alpha , 
-                                            kernel_.get() + kerneloutoffset + kernelinoffset , 
-                                            1, 
-                                            inputtlide.get(), 
-                                            inputtlide.shape().back()
-                                            , 
-                                            &beta , 
-                                            result.get() + resultbatchoffset + resultoutoffset , 
-                                            1
-                                        );
-                                        cublasDestroy(handle);
-                                    }
-                                    else{
+                            for(inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                            ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                                size_t cur = iter & 1;
+                                size_t prev = (iter + 1) & 1;
+
+                                Functional::im2col_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
+                                (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
+                                 single_kernel_size , single_input_shape.size()
+                                ,kershape.get() , imshape.get() ,single_input_size);
+                                CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
+                                
+                                if(iter > 0){
+                                    cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
+                                    cublasSetStream(handle , stream_gemm);
+                                    CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                                        1 , 
+                                        inputstride[input.ndim() - 2],
+                                        kernelstride[kernelstride.size() - 2], 
+                                        &alpha , 
+                                        kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
+                                        1, 
+                                        im2col_buf[prev] ,
+                                        single_kernel_size , 
+                                        &beta , 
+                                        result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
+                                        1
+                                    ));
+                                }
+                                iter++;
+                                prev_kerneloutoffset = kerneloutoffset;
+                                prev_kernelinoffset = kernelinoffset;
+                                prev_resultoutoffset = resultoutoffset;
+                                prev_resultbatchoffset = resultbatchoffset;
+                            }
+                        }
+                    }
+
+                    cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
+                    cublasSetStream(handle , stream_gemm);
+
+                    cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                        1 , 
+                        inputstride[input.ndim() - 2],
+                        kernelstride[kernelstride.size() - 2], 
+                        &alpha , 
+                        kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
+                        1, 
+                        im2col_buf[(iter + 1) & 1] ,
+                        single_kernel_size , 
+                        &beta , 
+                        result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
+                        1
+                    );
+                    cublasDestroy(handle);
+                    CHECK(cudaFree(im2col_buf[0]));
+                    CHECK(cudaFree(im2col_buf[1]));
+                    CHECK(cudaStreamDestroy(stream_gemm));
+                    CHECK(cudaStreamDestroy(stream_im2col));
+                }
+                else{
+                    for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
+                            for(size_t resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                                ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
+                                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                                        Tensor<float> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
+                                        Functional::im2col_ptr<float>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
+                                        ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
                                         for(size_t i = 0;i< inputtlide.shape()[0];i++){
                                             float sum = 0;
                                             for(size_t k = 0;k<inputtlide.shape()[1];k++){
@@ -1762,7 +1918,8 @@ namespace nn{
                                         }
                                     }
                                 }
-                            }
+                    }
+
                 }
                 if(input.requires_grad()){
                     result.set_requires_grad(true);
@@ -1784,27 +1941,147 @@ namespace nn{
                 std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
                 std::vector<size_t> single_output_stride(outstride.begin() , outstride.end() - 2);
                 Tensor<float>  grad_kernel(kernel_.shape() , kernel_.device());
-                for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                    ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                        for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                            ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                Tensor<float> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                Functional::im2col_ptr<float>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
-                                    ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
-                                if(kernel_.device() == Cuda){
-                                    cublasHandle_t handle;
-                                    cublasCreate(&handle);
-                                    float alpha = 1.0f;
-                                    float beta = 1.0f;
-                                    cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_T
-                                        , 1 , inputtlide.shape()[1] , inputtlide.shape()[0]
-                                        , &alpha , grad_out.get() + gradbatchoffset + gradoutoffset, 1 , 
-                                        inputtlide.get() , inputtlide.shape().back() , &beta , grad_kernel.get() + kerneloutoffset + kernelinoffset , 1);
-                                    cublasDestroy(handle);
+                Tensor<float>  grad_input(input.shape() , input.device());
+                if(grad_kernel.device() == Cuda){
+                    cublasHandle_t handle;
+                    cublasCreate(&handle);
+                    cudaStream_t stream_im2col, stream_gemm;
+                    cudaStreamCreate(&stream_im2col);
+                    cudaStreamCreate(&stream_gemm);
+
+                    cudaEvent_t ev[2];
+                    cudaEventCreate(&ev[0]);
+                    cudaEventCreate(&ev[1]);
+
+                    float * im2col_buf[2];
+
+                    auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                    size_t single_input_size = Functional::prod_vec(single_input_shape);
+                    size_t im2col_size = single_input_size * single_kernel_size * sizeof(float);
+
+                    CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                    CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+
+                    float alpha = 1.0f;
+                    float beta = 1.0f;
+
+                    size_t iter = 0;
+
+                    //preprocessing
+                    auto half_kernel_shape = single_kernel_shape;
+                    auto instride = single_input_stride;
+                    auto revinstride = instride;
+                    std::reverse(revinstride.begin() , revinstride.end());
+                    for(int i = 0;i<half_kernel_shape.size();i++){
+                        half_kernel_shape[i] /= 2;
+                    }
+                    std::vector<size_t> kernel_stride = {};
+                    size_t kernel_stride_ = 1;
+                    for(int i = 0;i<single_kernel_shape.size();i++){
+                        kernel_stride.push_back(kernel_stride_);
+                        kernel_stride_ *= single_kernel_shape[single_kernel_shape.size() - 1 - i];
+                    }
+                    cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
+                    cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
+                    size_t prev_gradoutoffset = 0 , prev_gradbatchoffset = 0 , prev_kerneloutoffset = 0 , prev_kernelinoffset = 0;
+
+                    
+                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                                size_t cur = iter & 1;
+                                size_t prev = (iter + 1) & 1;
+
+                                Functional::im2col_gpu_t<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
+                                (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
+                                 single_kernel_size , single_input_shape.size()
+                                ,kershape.get() , imshape.get() ,single_input_size);
+                                CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
+                                
+                                if(iter > 0){
+                                    cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
+                                    cublasSetStream(handle , stream_gemm);
+                                    CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
+                                        , 1 , single_kernel_size , single_input_size
+                                        , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
+                                        im2col_buf[prev] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
                                 }
-                                else{
+                                iter++;
+                                prev_kerneloutoffset = kerneloutoffset;
+                                prev_kernelinoffset = kernelinoffset;
+                                prev_gradoutoffset = gradoutoffset;
+                                prev_gradbatchoffset = gradbatchoffset;
+                            }
+                        }
+                    }
+                    cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
+                    cublasSetStream(handle , stream_gemm);
+                    CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
+                        , 1 , single_kernel_size , single_input_size
+                        , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
+                        im2col_buf[(iter + 1) & 1] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
+                    kernel_.set_grad(grad_kernel);
+                    size_t prev_inputbatchoffset = 0 , prev_inputinoffset = 0;
+                    iter = 0;
+
+                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                            ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+
+                                size_t cur = iter & 1;
+                                size_t prev = (iter + 1) & 1;
+
+                                CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
+                                CHECK_CUBLAS(cublasSetStream(handle , stream_gemm));
+                                cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
+                                    ,single_kernel_size , single_input_size , 1
+                                    , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
+                                    grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                    im2col_buf[cur] , single_kernel_size
+                                );
+                                CHECK(cudaEventRecord(ev[cur] , stream_gemm));
+
+                                if(iter > 0){
+                                    cudaStreamWaitEvent(stream_im2col , ev[prev] , 0);
+                                    Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
+                                    , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
+                                    ,kershape.get() , imshape.get() , single_input_size);
+                                }
+
+                                iter++;
+                                prev_inputbatchoffset = inputbatchoffset;
+                                prev_inputinoffset = inputinoffset;
+                            }
+                        }
+                    }
+
+                    cudaStreamWaitEvent(stream_im2col , ev[(iter + 1) & 1] , 0);
+                    Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
+                    , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
+                    ,kershape.get() , imshape.get() , single_input_size);
+
+                    cublasDestroy(handle);
+                    CHECK(cudaStreamDestroy(stream_gemm));
+                    CHECK(cudaStreamDestroy(stream_im2col));
+                    CHECK(cudaFree(im2col_buf[0]));
+                    CHECK(cudaFree(im2col_buf[1]));
+                }
+                else{
+                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                                    Tensor<float> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
+                                    Functional::im2col_ptr<float>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
+                                        ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
                                     for(size_t i = 0;i< inputtlide.shape()[1];i++){
                                         float sum = 0;
                                         for(size_t k = 0;k<inputtlide.shape()[0];k++){
@@ -1813,45 +2090,31 @@ namespace nn{
                                         }
                                         grad_kernel.get()[kerneloutoffset + kernelinoffset + i] += sum;
                                     }
-                                }
+                            }
                         }
                     }
-                }
-                kernel_.set_grad(grad_kernel);
-                Tensor<float>  grad_input(input.shape() , input.device());
-                for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                    ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                        for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                            Tensor<float> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                            if(kernel_.device() == Cuda){
-                                cublasHandle_t handle;
-                                cublasCreate(&handle);
-                                float alpha = 1.0f;
-                                float beta = 1.0f;
-                                cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                    ,inputtlide.shape()[1] , inputtlide.shape()[0] , 1
-                                    , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                    grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
-                                    inputtlide.get() , inputtlide.shape().back()
-                                );
-                                cublasDestroy(handle);
-                            }
-                            else{
-                                for(size_t i = 0;i<inputtlide.shape()[0];i++){
-                                    for(size_t j = 0;j < inputtlide.shape()[1];j++){
-                                        inputtlide.get()[i * inputtlide.shape()[1] + j] += 
-                                        grad_out.get()[gradbatchoffset + gradoutoffset + i] * 
-                                        kernel_.get()[kerneloutoffset + kernelinoffset + j];
+
+                    kernel_.set_grad(grad_kernel);
+                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                            ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                                Tensor<float> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
+                                    for(size_t i = 0;i<inputtlide.shape()[0];i++){
+                                        for(size_t j = 0;j < inputtlide.shape()[1];j++){
+                                            inputtlide.get()[i * inputtlide.shape()[1] + j] += 
+                                            grad_out.get()[gradbatchoffset + gradoutoffset + i] * 
+                                            kernel_.get()[kerneloutoffset + kernelinoffset + j];
+                                        }
                                     }
-                                }
+                                Functional::col2im_ptr(grad_input.get() + inputbatchoffset + inputinoffset , inputtlide.get()
+                                , single_input_shape , single_kernel_shape , single_input_stride , single_output_stride , input.device());
                             }
-                            Functional::col2im_ptr(grad_input.get() + inputbatchoffset + inputinoffset , inputtlide.get()
-                            , single_input_shape , single_kernel_shape , single_input_stride , single_output_stride , input.device());
                         }
                     }
+
                 }
                 return {grad_input};
             }
@@ -1859,7 +2122,6 @@ namespace nn{
                 return {kernel_};
             }
     };
-
     template <>
     class Conv<double> : public Module<double>{
         private:
@@ -1891,48 +2153,135 @@ namespace nn{
                 std::vector<size_t> single_input_shape(input.shape().begin()+2 , input.shape().end());
                 std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
                 std::vector<size_t> single_output_stride(resultstride.begin() , resultstride.end() - 2);
-                for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                    ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                        for(size_t resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                if(result.device() == Cuda){
+                    //ready for pipeline
+                    cublasHandle_t handle;
+                    cublasCreate(&handle);
+                    cudaStream_t stream_im2col, stream_gemm;
+                    cudaStreamCreate(&stream_im2col);
+                    cudaStreamCreate(&stream_gemm);
+
+                    cudaEvent_t ev[2];
+                    cudaEventCreate(&ev[0]);
+                    cudaEventCreate(&ev[1]);
+
+                    double * im2col_buf[2];
+
+                    auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                    size_t single_input_size = Functional::prod_vec(single_input_shape);
+                    size_t im2col_size = single_input_size * single_kernel_size * sizeof(double);
+
+                    CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                    CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+
+                    double alpha = 1.0f;
+                    double beta = 1.0f;
+
+                    size_t iter = 0;
+
+                    //preprocessing
+                    auto half_kernel_shape = single_kernel_shape;
+                    auto instride = single_input_stride;
+                    auto revinstride = instride;
+                    std::reverse(revinstride.begin() , revinstride.end());
+                    for(int i = 0;i<half_kernel_shape.size();i++){
+                        half_kernel_shape[i] /= 2;
+                    }
+                    std::vector<size_t> kernel_stride = {};
+                    size_t kernel_stride_ = 1;
+                    for(int i = 0;i<single_kernel_shape.size();i++){
+                        kernel_stride.push_back(kernel_stride_);
+                        kernel_stride_ *= single_kernel_shape[single_kernel_shape.size() - 1 - i];
+                    }
+                    cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
+                    cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
+                    size_t inputbatchoffset , resultbatchoffset , resultoutoffset , kerneloutoffset , inputinoffset , kernelinoffset;
+                    size_t prev_kerneloutoffset , prev_kernelinoffset , prev_resultoutoffset , prev_resultbatchoffset;
+                    for(inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
+                        for(resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
                             ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    Tensor<double> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                    Functional::im2col_ptr<double>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
-                                     ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
-                                    if(result.device() == Cuda){
-                                        cublasHandle_t handle;
-                                        cublasCreate(&handle);
-                                        double alpha = 1.0f;
-                                        double beta = 1.0f;
-                                        cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                            1 , 
-                                            inputstride[input.ndim() - 2],
-                                            kernelstride[kernelstride.size() - 2], 
-                                            &alpha , 
-                                            kernel_.get() + kerneloutoffset + kernelinoffset , 
-                                            1, 
-                                            inputtlide.get(), 
-                                            inputtlide.shape().back()
-                                            , 
-                                            &beta , 
-                                            result.get() + resultbatchoffset + resultoutoffset , 
-                                            1
-                                        );
-                                        cublasDestroy(handle);
-                                    }
-                                    else{
+                            for(inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                            ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                                size_t cur = iter & 1;
+                                size_t prev = (iter + 1) & 1;
+
+                                Functional::im2col_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
+                                (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
+                                 single_kernel_size , single_input_shape.size()
+                                ,kershape.get() , imshape.get() ,single_input_size);
+                                CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
+                                
+                                if(iter > 0){
+                                    cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
+                                    cublasSetStream(handle , stream_gemm);
+                                    CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                                        1 , 
+                                        inputstride[input.ndim() - 2],
+                                        kernelstride[kernelstride.size() - 2], 
+                                        &alpha , 
+                                        kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
+                                        1, 
+                                        im2col_buf[prev] ,
+                                        single_kernel_size , 
+                                        &beta , 
+                                        result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
+                                        1
+                                    ));
+                                }
+                                iter++;
+                                prev_kerneloutoffset = kerneloutoffset;
+                                prev_kernelinoffset = kernelinoffset;
+                                prev_resultoutoffset = resultoutoffset;
+                                prev_resultbatchoffset = resultbatchoffset;
+                            }
+                        }
+                    }
+
+                    cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
+                    cublasSetStream(handle , stream_gemm);
+
+                    cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                        1 , 
+                        inputstride[input.ndim() - 2],
+                        kernelstride[kernelstride.size() - 2], 
+                        &alpha , 
+                        kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
+                        1, 
+                        im2col_buf[(iter + 1) & 1] ,
+                        single_kernel_size , 
+                        &beta , 
+                        result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
+                        1
+                    );
+                    cublasDestroy(handle);
+                    CHECK(cudaFree(im2col_buf[0]));
+                    CHECK(cudaFree(im2col_buf[1]));
+                    CHECK(cudaStreamDestroy(stream_gemm));
+                    CHECK(cudaStreamDestroy(stream_im2col));
+                }
+                else{
+                    for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
+                            for(size_t resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                                ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
+                                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                                        Tensor<double> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
+                                        Functional::im2col_ptr<double>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
+                                        ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
                                         for(size_t i = 0;i< inputtlide.shape()[0];i++){
-                                            double sum = 0;
+                                             double sum = 0;
                                             for(size_t k = 0;k<inputtlide.shape()[1];k++){
-                                                sum += inputtlide.get()[i + inputtlide.shape()[1] * k] * 
+                                                sum += inputtlide.get()[i * inputtlide.shape()[1] + k] * 
                                                 kernel_.get()[kerneloutoffset+kernelinoffset+ k];
                                             }
                                             result.get()[resultbatchoffset + resultoutoffset + i] += sum;
                                         }
                                     }
                                 }
-                            }
+                    }
+
                 }
                 if(input.requires_grad()){
                     result.set_requires_grad(true);
@@ -1954,27 +2303,147 @@ namespace nn{
                 std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
                 std::vector<size_t> single_output_stride(outstride.begin() , outstride.end() - 2);
                 Tensor<double>  grad_kernel(kernel_.shape() , kernel_.device());
-                for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                    ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                        for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                            ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                Tensor<double> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                Functional::im2col_ptr<double>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
-                                    ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
-                                if(kernel_.device() == Cuda){
-                                    cublasHandle_t handle;
-                                    cublasCreate(&handle);
-                                    double alpha = 1.0f;
-                                    double beta = 1.0f;
-                                    cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_T
-                                        , 1 , inputtlide.shape()[1] , inputtlide.shape()[0]
-                                        , &alpha , grad_out.get() + gradbatchoffset + gradoutoffset, 1 , 
-                                        inputtlide.get() , inputtlide.shape().back() , &beta , grad_kernel.get() + kerneloutoffset + kernelinoffset , 1);
-                                    cublasDestroy(handle);
+                Tensor<double>  grad_input(input.shape() , input.device());
+                if(grad_kernel.device() == Cuda){
+                    cublasHandle_t handle;
+                    cublasCreate(&handle);
+                    cudaStream_t stream_im2col, stream_gemm;
+                    cudaStreamCreate(&stream_im2col);
+                    cudaStreamCreate(&stream_gemm);
+
+                    cudaEvent_t ev[2];
+                    cudaEventCreate(&ev[0]);
+                    cudaEventCreate(&ev[1]);
+
+                    double * im2col_buf[2];
+
+                    auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                    size_t single_input_size = Functional::prod_vec(single_input_shape);
+                    size_t im2col_size = single_input_size * single_kernel_size * sizeof(double);
+
+                    CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                    CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+
+                    double alpha = 1.0f;
+                    double beta = 1.0f;
+
+                    size_t iter = 0;
+
+                    //preprocessing
+                    auto half_kernel_shape = single_kernel_shape;
+                    auto instride = single_input_stride;
+                    auto revinstride = instride;
+                    std::reverse(revinstride.begin() , revinstride.end());
+                    for(int i = 0;i<half_kernel_shape.size();i++){
+                        half_kernel_shape[i] /= 2;
+                    }
+                    std::vector<size_t> kernel_stride = {};
+                    size_t kernel_stride_ = 1;
+                    for(int i = 0;i<single_kernel_shape.size();i++){
+                        kernel_stride.push_back(kernel_stride_);
+                        kernel_stride_ *= single_kernel_shape[single_kernel_shape.size() - 1 - i];
+                    }
+                    cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
+                    cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
+                    size_t prev_gradoutoffset = 0 , prev_gradbatchoffset = 0 , prev_kerneloutoffset = 0 , prev_kernelinoffset = 0;
+
+                    
+                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                                size_t cur = iter & 1;
+                                size_t prev = (iter + 1) & 1;
+
+                                Functional::im2col_gpu_t<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
+                                (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
+                                 single_kernel_size , single_input_shape.size()
+                                ,kershape.get() , imshape.get() ,single_input_size);
+                                CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
+                                
+                                if(iter > 0){
+                                    cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
+                                    cublasSetStream(handle , stream_gemm);
+                                    CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
+                                        , 1 , single_kernel_size , single_input_size
+                                        , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
+                                        im2col_buf[prev] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
                                 }
-                                else{
+                                iter++;
+                                prev_kerneloutoffset = kerneloutoffset;
+                                prev_kernelinoffset = kernelinoffset;
+                                prev_gradoutoffset = gradoutoffset;
+                                prev_gradbatchoffset = gradbatchoffset;
+                            }
+                        }
+                    }
+                    cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
+                    cublasSetStream(handle , stream_gemm);
+                    CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
+                        , 1 , single_kernel_size , single_input_size
+                        , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
+                        im2col_buf[(iter + 1) & 1] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
+                    kernel_.set_grad(grad_kernel);
+                    size_t prev_inputbatchoffset = 0 , prev_inputinoffset = 0;
+                    iter = 0;
+
+                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                            ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+
+                                size_t cur = iter & 1;
+                                size_t prev = (iter + 1) & 1;
+
+                                CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
+                                CHECK_CUBLAS(cublasSetStream(handle , stream_gemm));
+                                cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
+                                    ,single_kernel_size , single_input_size , 1
+                                    , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
+                                    grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                    im2col_buf[cur] , single_kernel_size
+                                );
+                                CHECK(cudaEventRecord(ev[cur] , stream_gemm));
+
+                                if(iter > 0){
+                                    cudaStreamWaitEvent(stream_im2col , ev[prev] , 0);
+                                    Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
+                                    , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
+                                    ,kershape.get() , imshape.get() , single_input_size);
+                                }
+
+                                iter++;
+                                prev_inputbatchoffset = inputbatchoffset;
+                                prev_inputinoffset = inputinoffset;
+                            }
+                        }
+                    }
+
+                    cudaStreamWaitEvent(stream_im2col , ev[(iter + 1) & 1] , 0);
+                    Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
+                    , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
+                    ,kershape.get() , imshape.get() , single_input_size);
+
+                    cublasDestroy(handle);
+                    CHECK(cudaStreamDestroy(stream_gemm));
+                    CHECK(cudaStreamDestroy(stream_im2col));
+                    CHECK(cudaFree(im2col_buf[0]));
+                    CHECK(cudaFree(im2col_buf[1]));
+                }
+                else{
+                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                                    Tensor<double> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
+                                    Functional::im2col_ptr<double>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
+                                        ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
                                     for(size_t i = 0;i< inputtlide.shape()[1];i++){
                                         double sum = 0;
                                         for(size_t k = 0;k<inputtlide.shape()[0];k++){
@@ -1983,45 +2452,31 @@ namespace nn{
                                         }
                                         grad_kernel.get()[kerneloutoffset + kernelinoffset + i] += sum;
                                     }
-                                }
+                            }
                         }
                     }
-                }
-                kernel_.set_grad(grad_kernel);
-                Tensor<double>  grad_input(input.shape() , input.device());
-                for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                    ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                        for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                            Tensor<double> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                            if(kernel_.device() == Cuda){
-                                cublasHandle_t handle;
-                                cublasCreate(&handle);
-                                double alpha = 1.0f;
-                                double beta = 1.0f;
-                                cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                    ,inputtlide.shape()[1] , inputtlide.shape()[0] , 1
-                                    , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                    grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
-                                    inputtlide.get() , inputtlide.shape().back()
-                                );
-                                cublasDestroy(handle);
-                            }
-                            else{
-                                for(size_t i = 0;i<inputtlide.shape()[0];i++){
-                                    for(size_t j = 0;j < inputtlide.shape()[1];j++){
-                                        inputtlide.get()[i * inputtlide.shape()[1] + j] += 
-                                        grad_out.get()[gradbatchoffset + gradoutoffset + i] * 
-                                        kernel_.get()[kerneloutoffset + kernelinoffset + j];
+
+                    kernel_.set_grad(grad_kernel);
+                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
+                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
+                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
+                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
+                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
+                            ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                                Tensor<double> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
+                                    for(size_t i = 0;i<inputtlide.shape()[0];i++){
+                                        for(size_t j = 0;j < inputtlide.shape()[1];j++){
+                                            inputtlide.get()[i * inputtlide.shape()[1] + j] += 
+                                            grad_out.get()[gradbatchoffset + gradoutoffset + i] * 
+                                            kernel_.get()[kerneloutoffset + kernelinoffset + j];
+                                        }
                                     }
-                                }
+                                Functional::col2im_ptr(grad_input.get() + inputbatchoffset + inputinoffset , inputtlide.get()
+                                , single_input_shape , single_kernel_shape , single_input_stride , single_output_stride , input.device());
                             }
-                            Functional::col2im_ptr(grad_input.get() + inputbatchoffset + inputinoffset , inputtlide.get()
-                            , single_input_shape , single_kernel_shape , single_input_stride , single_output_stride , input.device());
                         }
                     }
+
                 }
                 return {grad_input};
             }
@@ -2029,6 +2484,7 @@ namespace nn{
                 return {kernel_};
             }
     };
+
 
     template <typename T>
     class Pool2d : public Module<T>{

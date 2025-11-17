@@ -99,7 +99,15 @@ namespace mytorch{
     do { \
         curandStatus_t err = call; \
         if (err != CURAND_STATUS_SUCCESS) { \
-            fprintf(stderr, "cuRAND错误: 代码 %d (行号: %d)\n", err, __LINE__); \
+            fprintf(stderr, "cuRAND Error: %d (line: %d)\n", err, __LINE__); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+    #define CHECK_CUBLAS(call) \
+    do { \
+        cublasStatus_t err = call; \
+        if (err != CUBLAS_STATUS_SUCCESS) { \
+            fprintf(stderr, "cuBLAS Error: %d (line: %d)\n", err, __LINE__); \
             exit(EXIT_FAILURE); \
         } \
     } while (0)
@@ -134,7 +142,7 @@ namespace mytorch{
                 }
             }
             void release(){
-                if (ref_count_ && --(*ref_count_) == 0){
+                if (ref_count_ && (--(*ref_count_) == 0)){
                     if (device_ == Cpu){
                         delete[] data_;
                     }

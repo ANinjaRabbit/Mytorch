@@ -4,26 +4,31 @@
 
 int main(){
     using namespace mytorch;
-    //cpu
-    printf("Cpu results\n");
-    auto weight = rand<float>({3 , 3});
-    auto bias = rand<float>({3});
+    DefaultDevice = Cuda;
+
+
+
+    auto weight = rand<float>({10 , 100});
+    auto bias = rand<float>({10});
     auto fc = nn::Linear<float>(weight , bias);
-    auto x = rand<float>({2 , 3});
-    auto grad_out = rand<float>({2 , 3});
+    auto x = rand<float>({100 , 100});
     x.set_requires_grad(true);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
     auto y = fc(x);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    std::cout << "Linear forward time: " << milliseconds << " ms" << std::endl;
     y.print();
-    y.get_grad_fn()->backward(grad_out)[0].print();
-    weight.get_grad_tensor().print();
-    bias.get_grad_tensor().print();
-    //cuda
-    printf("Cuda results\n");
-    x.to(Cuda);
-    y = fc(x);
-    y.print();
-    grad_out.to(Cuda);
-    y.get_grad_fn()->backward(grad_out)[0].print();
-    weight.get_grad_tensor().print();
-    bias.get_grad_tensor().print();
+
+    cudaEventRecord(start);
+    y.backward();
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    std::cout << "Linear backward time: " << milliseconds << " ms" << std::endl;
 }
