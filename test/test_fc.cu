@@ -6,29 +6,16 @@ int main(){
     using namespace mytorch;
     DefaultDevice = Cuda;
 
-
-
-    auto weight = rand<float>({10 , 100});
-    auto bias = rand<float>({10});
-    auto fc = nn::Linear<float>(weight , bias);
-    auto x = rand<float>({100 , 100});
+    auto x = ones<float>({3});
     x.set_requires_grad(true);
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
+    auto weight = ones<float>({3 , 3});
+    auto bias = ones<float>({3});
+    auto fc = nn::Linear<float>(weight , bias);
     auto y = fc(x);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << "Linear forward time: " << milliseconds << " ms" << std::endl;
+    x.print();
     y.print();
-
-    cudaEventRecord(start);
     y.backward();
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << "Linear backward time: " << milliseconds << " ms" << std::endl;
+    x.get_grad_tensor().print();
+    weight.get_grad_tensor().print();
+    bias.get_grad_tensor().print();
 }

@@ -5,6 +5,7 @@
 using namespace mytorch;
 int main(){
     Device device = Cuda;
+    DefaultDevice = device;
     nn::Linear<float> fc1(rand<float>({3 , 3}) , rand<float>({3}));
     nn::ReLU<float> relu;
     nn::Linear<float> fc2(rand<float>({1 , 3}) , rand<float>({1}));

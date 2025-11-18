@@ -99,7 +99,7 @@ namespace mytorch{
     do { \
         curandStatus_t err = call; \
         if (err != CURAND_STATUS_SUCCESS) { \
-            fprintf(stderr, "cuRAND Error: %d (line: %d)\n", err, __LINE__); \
+            fprintf(stderr, "cuRAND Error: %d (line: %d) in file %s\n", err, __LINE__ , __FILE__); \
             exit(EXIT_FAILURE); \
         } \
     } while (0)
@@ -107,7 +107,7 @@ namespace mytorch{
     do { \
         cublasStatus_t err = call; \
         if (err != CUBLAS_STATUS_SUCCESS) { \
-            fprintf(stderr, "cuBLAS Error: %d (line: %d)\n", err, __LINE__); \
+            fprintf(stderr, "cuBLAS Error: %d (line: %d) in file %s\n", err, __LINE__ , __FILE__); \
             exit(EXIT_FAILURE); \
         } \
     } while (0)
@@ -536,6 +536,10 @@ namespace mytorch{
                 result.grad_fn_ = grad_fn_;
                 return result;
             }
+
+            void zero_grad(){
+                grad_ = cuda_shared_pointer<T>(); // make a null pointer
+            }
     };
     template <typename T>
     __global__ void __arange_kernel(T * output , const T start , const T step , const size_t n){
@@ -646,7 +650,7 @@ namespace mytorch{
             CHECK_CURAND(curandCreateGenerator(&rng, CURAND_RNG_PSEUDO_DEFAULT));
             CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(rng, (unsigned long long)time(0)));
             size_t roundSize = 1 << (64 - clz64_nonbuiltin(result.size_) );
-            if(roundSize == 2 * result.size_){
+            if(roundSize == 2 * result.size_ && result.size_ != 1){
                 roundSize = result.size_;
             }
             if constexpr (std::is_same_v<T , float>){
@@ -986,6 +990,20 @@ namespace mytorch{
                 return data_ptr_ == nullptr;
             }
             void backward(const Tensor<T> & grad_out = Tensor<T>());
+            void zero_grad(){
+                if(!data_ptr_){
+                    throw std::runtime_error("zero_grad() on null tensor");
+                }
+                data_ptr_->zero_grad();
+
+                auto grad_fn = get_grad_fn();
+                if(grad_fn){
+                    auto inputs = grad_fn->get_inputs();
+                    for(auto & input : inputs)
+                        input.zero_grad();
+                }
+            }
+
     };
 
     template <typename U>

@@ -34,6 +34,7 @@ void bind_tensor(py::module &m) {
         .def("set_grad",  &Tensor<T>::set_grad,
              "Set the gradient Tensor for this Tensor.")
         .def("get_grad_tensor", &Tensor<T>::get_grad_tensor, "Return the gradient Tensor of this Tensor.")
+        .def("zero_grad", &Tensor<T>::zero_grad, "Set the gradient Tensor to zero.")
 
         .def("__add__", &Tensor<T>::operator+, "Element-wise addition.")
         .def("__sub__", (Tensor<T> (Tensor<T>::*)(const Tensor<T>&) const) &Tensor<T>::operator-, "Element-wise subtraction.")

@@ -498,6 +498,7 @@ namespace nn{
                         a = inputs[0];
                     }
                     auto input = inputs[0];
+                    axis = input.ndim() - axis - 1;
                     std::vector<size_t> resultshape;
                     auto inputshape = input.shape();
                     for (int i = 0; i < inputshape.size(); i++){
@@ -1736,11 +1737,14 @@ namespace nn{
     class Linear<float> : public Module<float>{
         private:
             Tensor<float> weight;
+            Tensor<float> weight_t;
             Tensor<float> bias;
             Tensor<float> input_cache; // internal backward
         public:
             Linear(const Tensor<float> & weight, const Tensor<float> & bias)
-            : weight(weight), bias(bias) {}
+            : weight(weight), bias(bias) {
+                weight_t = weight.transpose({1 , 0});
+            }
             Tensor<float> forward(const std::vector<Tensor<float>> & inputs) override{
                 auto input = inputs[0];
                 if(input.requires_grad()){
@@ -1842,17 +1846,17 @@ namespace nn{
                         
                         cublasSetStream(handle , stream_gemm);
                         CHECK_CUBLAS(
-                            cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                input.shape().back() ,  grad_out.shape().back(), 1,
-                                &alpha , 
-                                input.get() + inputoffset , 
-                                input.shape().back(),
-                                grad_out.get() + gradoutoffset,
-                                1
-                                ,&beta , 
-                                grad_weight.get(),
-                                grad_weight.shape().back()
-                            ));
+                        cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                            input.shape().back() ,  grad_out.shape().back(), 1,
+                            &alpha , 
+                            input.get() + inputoffset , 
+                            stepinput,
+                            grad_out.get() + gradoutoffset,
+                            1
+                            ,&beta , 
+                            grad_weight.get(),
+                            grad_weight.shape().back()
+                        ));
 
                         
 
@@ -1867,21 +1871,22 @@ namespace nn{
 
                     
                     auto batch_size = grad_out.size() / stepgradout;
+                    CHECK_CUBLAS(
                     cublasSgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_N,
                         1, input.shape().back(), grad_out.shape().back(),
                         &alpha,
                         grad_out.get(),
                         1,
                         stepgradout,
-                        weight.get(),
-                        weight.shape().back(),
+                        weight_t.get(),
+                        weight_t.shape().back(),
                         0,
                         &beta,
                         grad_input.get(),
-                        input.shape().back(),
+                        1,
                         stepinput,
-                        batch_size
-                    );
+                        grad_out.size() / stepgradout
+                    ));
                     CHECK(cudaStreamDestroy(stream_add));
                     CHECK(cudaStreamDestroy(stream_gemm));
                     cublasDestroy(handle);
@@ -3243,6 +3248,21 @@ namespace nn{
             std::vector<size_t> label_cache_;
         public:
             CrossEntropy(const std::vector<size_t> & label_cache) : label_cache_(label_cache){}
+            CrossEntropy(const Tensor<T> & label_cache){
+                label_cache_ = std::vector<size_t>(label_cache.size());
+                if(label_cache.device() == Cpu ){
+                    for(int i = 0;i < label_cache_.size();i++){
+                        label_cache_[i] = (size_t)label_cache.get()[i];
+                    }
+                }
+                else{
+                    auto tmp = label_cache.deepcopy();
+                    tmp.to(Cpu);
+                    for(int i = 0;i < label_cache_.size();i++){
+                        label_cache_[i] = (size_t)tmp.get()[i];
+                    }
+                }
+            }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                 if(inputs.size()!= 1){
                     throw std::runtime_error("CrossEntropy input size must be 1");
