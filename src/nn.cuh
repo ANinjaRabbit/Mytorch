@@ -1925,18 +1925,22 @@ namespace nn{
     class Linear<double> : public Module<double>{
         private:
             Tensor<double> weight;
+            Tensor<double> weight_t;
             Tensor<double> bias;
             Tensor<double> input_cache; // internal backward
         public:
             Linear(const Tensor<double> & weight, const Tensor<double> & bias)
-            : weight(weight), bias(bias) {}
+            : weight(weight), bias(bias) {
+                weight_t = weight.transpose({1 , 0});
+            }
             Tensor<double> forward(const std::vector<Tensor<double>> & inputs) override{
                 auto input = inputs[0];
                 if(input.requires_grad()){
                     input_cache = input;
                 }
-                std::vector<size_t> newshape = weight.shape();
+                std::vector<size_t> newshape = input.shape();
                 newshape.pop_back();
+                newshape.push_back(bias.size());
                 Tensor<double> result(newshape , input.device());
                 result.set_requires_grad(input.requires_grad());
                 auto resultshape = result.shape();
@@ -1959,6 +1963,8 @@ namespace nn{
                     double beta = 1.0f;
                     __cudaMemcpyBatch(result.get() , bias.get() , stepresult , result.size() / stepresult);
 
+                    auto batch_size = result.size() / stepresult;
+
                     cublasDgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                         1,
                         resultshape[resultshape.size() - 1],
@@ -1974,11 +1980,15 @@ namespace nn{
                         result.get(),
                         1,
                         stepresult,
-                        result.size() / stepresult
+                        batch_size
                     );
+
                     cublasDestroy(handle);
+
                 }
                 else{
+                    weight.to(Cpu);
+                    bias.to(Cpu);
                     for(int  offset1 = 0 , offsetresult = 0;offsetresult < result.size(); offset1 += step1 , offsetresult += stepresult){
                         for(int i = 0;i<result.shape()[result.shape().size() - 1];i++){
                                 double sum = 0.0;
@@ -2014,41 +2024,59 @@ namespace nn{
                     cublasCreate(&handle);
                     double alpha = 1.0f;
                     double beta = 1.0f;
-                    for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
 
-                        cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N,
+                    cudaStream_t stream_gemm,stream_add;
+                    cudaStreamCreate(&stream_gemm);
+                    cudaStreamCreate(&stream_add);
+
+
+                    for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
+                        
+                        cublasSetStream(handle , stream_gemm);
+                        CHECK_CUBLAS(
+                        cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                             input.shape().back() ,  grad_out.shape().back(), 1,
                             &alpha , 
                             input.get() + inputoffset , 
-                            1 , 
+                            stepinput,
                             grad_out.get() + gradoutoffset,
                             1
                             ,&beta , 
                             grad_weight.get(),
                             grad_weight.shape().back()
-                        );
-                        _linear_add<double><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum>>>(
+                        ));
+
+                        
+
+
+                        _linear_add<double><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum , 0 , stream_add>>>(
                             grad_bias.get() , 
                             grad_out.get() + gradoutoffset , 
                             grad_bias.size()
                         );
+
                     }
 
-                    cublasDgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_T,
+                    
+                    auto batch_size = grad_out.size() / stepgradout;
+                    CHECK_CUBLAS(
+                    cublasDgemmStridedBatched(handle , CUBLAS_OP_N, CUBLAS_OP_N,
                         1, input.shape().back(), grad_out.shape().back(),
                         &alpha,
                         grad_out.get(),
                         1,
                         stepgradout,
-                        weight.get(),
-                        weight.shape().back(),
+                        weight_t.get(),
+                        weight_t.shape().back(),
                         0,
                         &beta,
                         grad_input.get(),
                         1,
                         stepinput,
                         grad_out.size() / stepgradout
-                    );
+                    ));
+                    CHECK(cudaStreamDestroy(stream_add));
+                    CHECK(cudaStreamDestroy(stream_gemm));
                     cublasDestroy(handle);
 
                 }

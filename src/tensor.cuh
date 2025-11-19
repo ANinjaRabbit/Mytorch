@@ -1003,6 +1003,38 @@ namespace mytorch{
                         input.zero_grad();
                 }
             }
+            friend Tensor<T> operator+(const T & a, const Tensor<T> & b){
+                Tensor<T> a_tensor(a , b.shape() , b.device());
+                return a_tensor + b;
+            }
+            friend Tensor<T> operator+(const Tensor<T> & a, const T & b){
+                Tensor<T> b_tensor(b , a.shape() , a.device());
+                return a + b_tensor;
+            }
+            friend Tensor<T> operator-(const T & a, const Tensor<T> & b){
+                Tensor<T> a_tensor(a , b.shape() , b.device());
+                return a_tensor - b;
+            }
+            friend Tensor<T> operator-(const Tensor<T> & a, const T & b){
+                Tensor<T> b_tensor(b , a.shape() , a.device());
+                return a - b_tensor;
+            }
+            friend Tensor<T> operator*(const T & a, const Tensor<T> & b){
+                Tensor<T> a_tensor(a , b.shape() , b.device());
+                return a_tensor * b;
+            }
+            friend Tensor<T> operator*(const Tensor<T> & a, const T & b){
+                Tensor<T> b_tensor(b , a.shape() , a.device());
+                return a * b_tensor;
+            }
+            friend Tensor<T> operator/(const T & a, const Tensor<T> & b){
+                Tensor<T> a_tensor(a , b.shape() , b.device());
+                return a_tensor / b;
+            }
+            friend Tensor<T> operator/(const Tensor<T> & a, const T & b){
+                Tensor<T> b_tensor(b , a.shape() , a.device());
+                return a / b_tensor;
+            }
 
     };
 
