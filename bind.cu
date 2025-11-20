@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include "src/tensor.cuh"
 #include "src/nn.cuh"
+#include "src/optim.cuh"
 
 namespace py = pybind11;
 using namespace mytorch;
@@ -129,20 +130,27 @@ void bind_module(py::module &m_mod) {
         .def("__call__" , (Tensor<T>(Module<T>::*)(const Tensor<T>&)) &Module<T>::operator() , "Forward pass through the module for only one input.")
         ;
 
-    // Subclasses
-    py::class_<Linear<T>, Module<T>, std::shared_ptr<Linear<T>>>(m_mod, "Linear",
+        // Subclasses
+        py::class_<Linear<T>, Module<T>, std::shared_ptr<Linear<T>>>(m_mod, "Linear",
         "Fully connected layer: y = xW^T + b.")
-        .def(py::init<const Tensor<T>&, const Tensor<T>&>(), py::arg("weight"), py::arg("bias"));
+        .def(py::init(
+            [] (const size_t in_features , const size_t out_features , py::object device_obj)
+            {
+                Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+                return std::make_shared<Linear<T>>(in_features , out_features , device);
+            }
+        ) , py::arg("in_features") , py::arg("out_features") , py::arg("device") = py::none());
 
         py::class_<Conv<T>, Module<T>, std::shared_ptr<Conv<T>>>(m_mod, "Conv",
             "Convolutional layer using a learnable kernel.")
-        .def(py::init([](const Tensor<T>& kernel, py::object padding_mode_obj) {
+        .def(py::init([]( const std::vector<size_t> & kernel_shape , py::object padding_mode_obj , py::object device_obj)
+        {
             PaddingMode padding_mode = padding_mode_obj.is_none() ? PaddingMode::ZeroPadding : padding_mode_obj.cast<PaddingMode>();
-            return std::make_shared<Conv<T>>(kernel, padding_mode);
-        }),
-        py::arg("kernel"),
-        py::arg("padding_mode") = py::none()
-    );
+            Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+            return std::make_shared<Conv<T>>(kernel_shape , padding_mode , device);
+        }
+        ) , py::arg("kernel_shape") , py::arg("padding_mode") = py::none() , py::arg("device") = py::none())
+        ;
 
 
     py::class_<Pool2d<T>, Module<T>, std::shared_ptr<Pool2d<T>>>(m_mod, "Pool2d",
@@ -165,6 +173,70 @@ void bind_module(py::module &m_mod) {
         "Sigmoid activation module.")
         .def(py::init<>());
     
+}
+
+template <typename T>
+void bind_optim(py::module &m_optim) {
+    using namespace mytorch::optim;
+
+    // ---------------- SGD ----------------
+    py::class_<SGD<T> , std::shared_ptr<SGD<T>>>(m_optim, "SGD",
+        R"doc(
+        Stochastic Gradient Descent optimizer.
+
+        Args:
+            params (List[Tensor]): List of tensors to optimize.
+            lr (float): Learning rate. Default: 0.01
+            device (Device): Compute device. Default: DefaultDevice
+
+        Methods:
+            step(): Update all parameters in-place.
+        )doc")
+        .def(py::init([](std::vector<Tensor<T>> &params,
+                 T lr,
+                 py::object device_obj)
+            {
+                Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+                return std::make_shared<SGD<T>>(params, lr, device);
+            }),
+            py::arg("params"),
+            py::arg("lr") = T(0.01),
+            py::arg("device") = py::none())
+        .def("step", &SGD<T>::step, "Perform one SGD update step.");
+
+    // ---------------- Adam ----------------
+    py::class_<Adam<T> , std::shared_ptr<Adam<T>>>(m_optim, "Adam",
+        R"doc(
+        Adam optimizer.
+
+        Args:
+            params (List[Tensor]): List of tensors to optimize.
+            lr (float): Learning rate. Default: 0.001
+            beta1 (float): Exponential decay for first moment. Default: 0.9
+            beta2 (float): Exponential decay for second moment. Default: 0.999
+            eps (float): Numerical stability constant. Default: 1e-8
+            device (Device): Compute device. Default: DefaultDevice
+
+        Methods:
+            step(): Update all parameters using Adam algorithm.
+        )doc")
+        .def(py::init([](std::vector<Tensor<T>> &params,
+                T lr,
+                T beta1,
+                T beta2,
+                T eps,
+                py::object device_obj)
+            {
+                Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+                return std::make_shared<Adam<T>>(params, lr, beta1, beta2, eps, device);
+            }),
+            py::arg("params"),
+            py::arg("lr") = T(0.001),
+            py::arg("beta1") = T(0.9),
+            py::arg("beta2") = T(0.999),
+            py::arg("eps") = T(1e-8),
+            py::arg("device") = py::none())
+        .def("step", &Adam<T>::step, "Perform one Adam update step.");
 }
 
 
@@ -276,6 +348,7 @@ PYBIND11_MODULE(mytorch, m) {
     // Submodules
     auto m_func = m.def_submodule("Functional", "Autograd function definitions.");
     auto m_mod = m.def_submodule("nn", "Neural network modules.");
+    auto m_optim = m.def_submodule("optim", "Optimization algorithms.");
 
     py::enum_<nn::PaddingMode>(m_mod, "PaddingMode")
         .value("NoPadding", nn::PaddingMode::NoPadding)
@@ -296,4 +369,5 @@ PYBIND11_MODULE(mytorch, m) {
     bind_function<float>(m_func);
     bind_module<float>(m_mod);
     bind_f<float>(m);
+    bind_optim<float>(m_optim);
 }

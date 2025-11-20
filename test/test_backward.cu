@@ -21,6 +21,7 @@ int main(){
     loss.print();
     auto l = loss * loss;
     l.print();
+    l.zero_grad();
     l.backward();
     x.get_grad_tensor().print();
     x.to(Cpu);

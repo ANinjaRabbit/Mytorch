@@ -1,27 +1,22 @@
 #include "../src/tensor.cuh"
 #include "../src/nn.cuh"
 #include "../src/autograd.cuh"
+#include "../src/optim.cuh"
 using namespace mytorch;
+
 int main(){
     DefaultDevice = Cuda;
-
-    // correctness test
-    auto kernel = randn<float>({1 , 1 , 3 , 3});
-    auto conv = nn::Conv<float>(kernel , nn::NoPadding);
-    auto a = randn<float>({1 ,1 , 400 , 400});
-    kernel.print();
-    a.set_requires_grad(true);
-    cudaEvent_t start , stop;
+    cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+    auto softmax = nn::Softmax<float>();
+    auto X = ones<float>({10 , 512});
     cudaEventRecord(start);
-    auto b = conv(a);
+    auto y = softmax(X);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
-    printf("Time: %f ms\n", milliseconds);
-
-
-
+    std::cout << "Time: " << milliseconds << " ms" << std::endl;
+    return 0;
 }

@@ -296,6 +296,8 @@ namespace mytorch{
 
 
 
+
+
     template <typename T>
     class TensorRaw{
         private:
@@ -340,6 +342,16 @@ namespace mytorch{
                 data_ = cuda_shared_pointer<T>(value , size_ , device);
                 requires_grad_ = false;
             }
+            TensorRaw<T>(cuda_shared_pointer<T> & data , const std::vector<size_t> & shape){// create a view 
+                size_ = get_strides_with_shape(shape);
+                if(data.is_null() || data.size() != size_){
+                    std::cerr << "Invalid view!" << std::endl;
+                    throw std::runtime_error("Invalid view!");
+                }
+                shape_ = shape;
+                data_ = data;
+                requires_grad_ = false;
+            }
             size_t size() const{
                 return size_;
             }
@@ -362,6 +374,9 @@ namespace mytorch{
                 grad_ = grad.data_;
             }
             const cuda_shared_pointer<T> & get_grad() const{
+                return grad_;
+            }
+            cuda_shared_pointer<T> & get_grad(){
                 return grad_;
             }
             cuda_shared_pointer<T> & get_shared_ptr(){
@@ -538,7 +553,17 @@ namespace mytorch{
             }
 
             void zero_grad(){
-                grad_ = cuda_shared_pointer<T>(); // make a null pointer
+                if(grad_.is_null()){
+                    grad_ = cuda_shared_pointer<T>(this->size() , this->device());
+                }
+                else{
+                    if(this->device() == Cuda){
+                        CHECK(cudaMemset(grad_.get() , 0 , sizeof(T) * this->size()));
+                    }
+                    else{
+                        std::fill(grad_.get() , grad_.get() + this->size() , T(0));
+                    }
+                }
             }
     };
     template <typename T>
@@ -854,6 +879,8 @@ namespace mytorch{
             friend Tensor<U> randn(const std::vector<size_t>& shape, const Device device );
             template <typename U>
             friend Tensor<U> full(const std::vector<size_t>& shape, const U value  , const Device device );
+            template <typename U>
+            friend Tensor<U> make_view(cuda_shared_pointer<U> & data , const std::vector<size_t> & shape);
             // no need for destruction
             void print() const {
                 if(!data_ptr_){
@@ -948,6 +975,12 @@ namespace mytorch{
                 }
                 return data_ptr_->get_grad();
             }
+            cuda_shared_pointer<T> & get_grad(){
+                if(!data_ptr_){
+                    throw std::runtime_error("get_grad() on null tensor");
+                }
+                return data_ptr_->get_grad();
+            }
             Tensor<T> get_grad_tensor() const{
                 if(!data_ptr_){
                     throw std::runtime_error("get_grad_tensor() on null tensor");
@@ -1035,6 +1068,20 @@ namespace mytorch{
                 Tensor<T> b_tensor(b , a.shape() , a.device());
                 return a / b_tensor;
             }
+            T item() const{
+                if(!data_ptr_){
+                    std::cerr << "item() on null tensor" << std::endl;
+                    throw std::runtime_error("item() on null tensor");
+                }
+                if(data_ptr_->device() == Cpu){
+                    return data_ptr_->get()[0];
+                }
+                else{
+                    T result;
+                    CHECK(cudaMemcpy(&result , data_ptr_->get() , sizeof(T) , cudaMemcpyDeviceToHost));
+                    return result;
+                }
+            }
 
     };
 
@@ -1080,6 +1127,12 @@ namespace mytorch{
             return a.data_ptr_.get() < b.data_ptr_.get();
         }
     };
+    template <typename T>
+    Tensor<T> make_view(cuda_shared_pointer<T> & data , const std::vector<size_t> & shape){
+        Tensor<T> result;
+        result.data_ptr_ = std::make_shared<TensorRaw<T>>(data , shape);
+        return result;
+    }
 
 
 }
