@@ -78,7 +78,7 @@ namespace mytorch{
     }
 
     const size_t kCudaThreadsNum = 512;
-    inline int CudaGetBlocks(const int N) {
+    __host__ __device__ inline int CudaGetBlocks(const int N) {
         return(N + kCudaThreadsNum-1) / kCudaThreadsNum;
     }
     // Define the grid stride looping
@@ -138,7 +138,6 @@ namespace mytorch{
                 }
                 else{
                     CHECK(cudaMalloc(&data_, size_ * sizeof(T)));
-                    CHECK(cudaMemset(data_ , 0 , size_ * sizeof(T)));
                 }
             }
             void release(){
@@ -155,8 +154,16 @@ namespace mytorch{
             int ref_count() const{
                 return ref_count_ ? *ref_count_ : 0;
             }
-            cuda_shared_pointer(const size_t size ,const Device device = DefaultDevice){
+            cuda_shared_pointer(const size_t size ,const Device device = DefaultDevice , const bool need_init = true){
                 allocate(size , device);
+                if(need_init){
+                    if(device == Cpu){
+                        memset(data_ , 0 , size_ * sizeof(T));
+                    }
+                    else{
+                        CHECK(cudaMemset(data_ , 0 , size_ * sizeof(T)));
+                    }
+                }
             }
             cuda_shared_pointer(const T * data ,const size_t size ,const Device device = DefaultDevice){
                 if(device == Cpu){
@@ -431,12 +438,14 @@ namespace mytorch{
                 shape_ = shape;
                 size_ = get_strides_with_shape(shape);
                 data_ = cuda_shared_pointer<T>(size_ , device);
-                if (device == Cpu){
-                    std::fill(data_.get(), data_.get() + size_, T(0));
-                }
-                else{
-                    CHECK(cudaMemset(data_.get(), 0, size_ * sizeof(T)));
-                }
+                requires_grad_ = false;
+                grad_ = cuda_shared_pointer<T>();
+                grad_fn_ = nullptr;
+            }
+            TensorRaw(const std::vector<size_t> & shape , const bool need_init ,const Device device){
+                shape_ = shape;
+                size_ = get_strides_with_shape(shape);
+                data_ = cuda_shared_pointer<T>(size_ , device , need_init);
                 requires_grad_ = false;
                 grad_ = cuda_shared_pointer<T>();
                 grad_fn_ = nullptr;
@@ -672,8 +681,9 @@ namespace mytorch{
         else{
             static_assert(std::is_same_v<T , float> || std::is_same_v<T , double> , "rand only support float and double");
             curandGenerator_t rng;
+            std::random_device rd;
             CHECK_CURAND(curandCreateGenerator(&rng, CURAND_RNG_PSEUDO_DEFAULT));
-            CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(rng, (unsigned long long)time(0)));
+            CHECK_CURAND(curandSetPseudoRandomGeneratorSeed(rng, (unsigned long long)rd()));
             size_t roundSize = 1 << (64 - clz64_nonbuiltin(result.size_) );
             if(roundSize == 2 * result.size_ && result.size_ != 1){
                 roundSize = result.size_;
@@ -863,6 +873,9 @@ namespace mytorch{
 
             Tensor(const std::vector<size_t> & shape ,const Device device=DefaultDevice){
                 data_ptr_ = std::make_shared<TensorRaw<T>>(shape , device);
+            }
+            Tensor(const std::vector<size_t> & shape , const bool need_init , const Device device){
+                data_ptr_ = std::make_shared<TensorRaw<T>>(shape , need_init , device);
             }
             int ref_count() const{
                 return data_ptr_.use_count();

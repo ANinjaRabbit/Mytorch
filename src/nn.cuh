@@ -8,11 +8,14 @@ namespace mytorch{
 namespace nn{
     constexpr size_t kCudaTransposeTileSize = 4;
     constexpr size_t kCudaMultiDimMax = 16;
+    constexpr int kStreamCount = 8;
     template <typename T>
     class Module{
+        protected:
+            bool training;
         public:
             
-            Module() = default;
+            Module(){ training = true; };
             virtual Tensor<T> forward(const std::vector<Tensor<T>> & input){
                 return Tensor<T>();
             }
@@ -739,9 +742,20 @@ namespace nn{
                     TGeneral
                 };
                 TransposeType ttype;
+                cudaStream_t streams[8];
 
             public:
+                const int streamCount = 8;
+                ~TransposeFunc(){
+                    for(int i = 0;i<streamCount;i++){
+                        CHECK(cudaStreamDestroy(streams[i]));
+                    }
+                }
+                
                 TransposeFunc(const std::vector<size_t> & perm) : perm(perm){
+                    for(int i = 0;i<streamCount;i++){
+                        CHECK(cudaStreamCreate(&streams[i]));
+                    }
                     size_t eq_count = 0;
                     for(eq_count = 0;eq_count<perm.size() ;eq_count++){
                         if(perm[eq_count] != eq_count){
@@ -772,12 +786,7 @@ namespace nn{
                     result.set_requires_grad(input[0].requires_grad());
                     if(result.device() == Cuda){
                         if(ttype == TLast2Dim){
-                            constexpr int streamCount = 8;
-                            cudaStream_t streams[streamCount];
 
-                            for(int i = 0;i<streamCount;i++){
-                                CHECK(cudaStreamCreate(&streams[i]));
-                            }
 
                             size_t ndim = input[0].shape().size();
                             size_t m = input[0].shape()[ndim - 2];
@@ -800,18 +809,9 @@ namespace nn{
                                 );
 
                             }
-                            for(int i = 0;i < streamCount;i++){
-                                CHECK(cudaStreamSynchronize(streams[i]));
-                                CHECK(cudaStreamDestroy(streams[i]));
-                            }
                         }
                         else if(ttype == THWC2CHW){
-                            constexpr int streamCount = 8;
-                            cudaStream_t streams[streamCount];
 
-                            for(int i = 0;i<streamCount;i++){
-                                CHECK(cudaStreamCreate(&streams[i]));
-                            }
 
                             size_t ndim = input[0].shape().size();
                             size_t h = input[0].shape()[ndim - 3];
@@ -835,18 +835,9 @@ namespace nn{
                                 );
 
                             }
-                            for(int i = 0;i < streamCount;i++){
-                                CHECK(cudaStreamSynchronize(streams[i]));
-                                CHECK(cudaStreamDestroy(streams[i]));
-                            }
                         }
                         else if(ttype == TCHW2HWC){
-                            constexpr int streamCount = 8;
-                            cudaStream_t streams[streamCount];
 
-                            for(int i = 0;i<streamCount;i++){
-                                CHECK(cudaStreamCreate(&streams[i]));
-                            }
 
                             size_t ndim = input[0].shape().size();
                             size_t c = input[0].shape()[ndim - 3];
@@ -869,10 +860,6 @@ namespace nn{
                                     c , h , w
                                 );
 
-                            }
-                            for(int i = 0;i < streamCount;i++){
-                                CHECK(cudaStreamSynchronize(streams[i]));
-                                CHECK(cudaStreamDestroy(streams[i]));
                             }
                         }
                         else{
@@ -917,7 +904,145 @@ namespace nn{
                     return result;
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out){
-                    return {grad_out.transpose(_get_reverse_perm(perm))};
+                    //return {grad_out.transpose(_get_reverse_perm(perm))};
+                    std::vector<size_t> revperm = _get_reverse_perm(perm);
+                    std::vector<size_t> newshape = a.shape();
+                    Tensor<T> result(newshape , a.device());
+                    if(result.device() == Cuda){
+                        TransposeType ttype;
+                        size_t eq_count = 0;
+                        for(eq_count = 0;eq_count<revperm.size() ;eq_count++){
+                            if(revperm[eq_count] != eq_count){
+                                break;
+                            }
+                        }
+                        if(eq_count == revperm.size() - 2 && revperm.back() == revperm.size() - 2){
+                            ttype = TLast2Dim;
+                        }
+                        else if(eq_count == revperm.size() - 3 && revperm.back() == revperm.size() - 2 && revperm[eq_count] == revperm.size() - 1){
+                            ttype = THWC2CHW;
+                        }
+                        else if(eq_count == revperm.size() - 3 && revperm.back() == eq_count && revperm[eq_count] == revperm.size() - 2){
+                            ttype = TCHW2HWC;
+                        }
+                        else{
+                            ttype = TGeneral;
+                        }
+
+                        if(ttype == TLast2Dim){
+
+
+                            size_t ndim = grad_out.shape().size();
+                            size_t m = grad_out.shape()[ndim - 2];
+                            size_t n = grad_out.shape()[ndim - 1];
+                            size_t batchstep = m * n;
+                            size_t batch_size = grad_out.size()/ batchstep;
+
+                            dim3 grid_size(divroundup(n , kCudaTransposeTileSize) , divroundup(m , kCudaTransposeTileSize));
+                            dim3 block_size(kCudaTransposeTileSize , kCudaTransposeTileSize);
+
+
+                            for(size_t b = 0;b < batch_size;b ++){
+                                int s = b % streamCount;
+                                _transpose_forward_kernel_2dim
+                                <<<grid_size , block_size , sizeof(T) * kCudaTransposeTileSize * kCudaTransposeTileSize , streams[s]>>>
+                                (
+                                    result.get() + b * batchstep,
+                                    grad_out.get() + b * batchstep,
+                                    m , n
+                                );
+
+                            }
+                        }
+                        else if(ttype == THWC2CHW){
+
+                            size_t ndim = grad_out.shape().size();
+                            size_t h = grad_out.shape()[ndim - 3];
+                            size_t w = grad_out.shape()[ndim - 2];
+                            size_t c = grad_out.shape()[ndim - 1];
+                            size_t batchstep = h * w * c;
+                            size_t batch_size = grad_out.size()/ batchstep;
+
+                            dim3 grid_size(divroundup(c , kCudaTransposeTileSize) , divroundup(w , kCudaTransposeTileSize) , divroundup(h , kCudaTransposeTileSize));
+                            dim3 block_size(kCudaTransposeTileSize , kCudaTransposeTileSize , kCudaTransposeTileSize );
+
+
+                            for(size_t b = 0;b < batch_size;b ++){
+                                int s = b % streamCount;
+                                _transpose_forward_kernel_HWC2CHW
+                                <<<grid_size , block_size , sizeof(T) * kCudaTransposeTileSize * kCudaTransposeTileSize * kCudaTransposeTileSize , streams[s]>>>
+                                (
+                                    result.get() + b * batchstep,
+                                    grad_out.get() + b * batchstep,
+                                    h , w , c
+                                );
+
+                            }
+                        }
+                        else if(ttype == TCHW2HWC){
+
+                            size_t ndim = grad_out.shape().size();
+                            size_t c = grad_out.shape()[ndim - 3];
+                            size_t h = grad_out.shape()[ndim - 2];
+                            size_t w = grad_out.shape()[ndim - 1];
+                            size_t batchstep = h * w * c;
+                            size_t batch_size = grad_out.size()/ batchstep;
+
+                            dim3 grid_size(divroundup(w , kCudaTransposeTileSize) , divroundup(h , kCudaTransposeTileSize) , divroundup(c , kCudaTransposeTileSize));
+                            dim3 block_size(kCudaTransposeTileSize , kCudaTransposeTileSize , kCudaTransposeTileSize );
+
+
+                            for(size_t b = 0;b < batch_size;b ++){
+                                int s = b % streamCount;
+                                _transpose_forward_kernel_CHW2HWC
+                                <<<grid_size , block_size , sizeof(T) * kCudaTransposeTileSize * kCudaTransposeTileSize * kCudaTransposeTileSize , streams[s]>>>
+                                (
+                                    result.get() + b * batchstep,
+                                    grad_out.get() + b * batchstep,
+                                    c , h , w
+                                );
+
+                            }
+                        }
+                        else{
+                             size_t totalthreads = 1;
+                            for(int i = 0;i < grad_out.shape().size();i++){
+                                totalthreads *= divroundup(grad_out.shape()[i] , kCudaTransposeTileSize);
+                            }
+                            size_t tilesize = (1 << (2 * grad_out.shape().size()));
+                            cuda_shared_pointer<size_t> shape(grad_out.shape() , Cuda);
+                            cuda_shared_pointer<size_t> outstrides(result.get_strides() , Cuda);
+                            cuda_shared_pointer<size_t> instrides(grad_out.get_strides() , Cuda);
+                            cuda_shared_pointer<size_t> cuperm(revperm , Cuda);
+                            cuda_shared_pointer<size_t> curevperm(perm , Cuda);
+
+                            _transpose_forward_kernel<<<totalthreads , tilesize , sizeof(T) * tilesize>>>(result.get() , grad_out.get() , 
+                                result.size() , shape.size() , shape.get() , instrides.get() , outstrides.get() , cuperm.get() , curevperm.get());
+
+
+                            }
+                        return {result};
+                    }
+                    else{
+                        auto instrides = grad_out.get_strides();
+                        instrides.push_back(grad_out.size());
+                        auto strides = result.get_strides();
+                        size_t ndim = grad_out.shape().size();
+                        for(int index = 0;index<grad_out.size();index+= instrides[0]){
+                            std::vector<size_t> idx(ndim);
+                            for(int i = 0;i<ndim;i++){
+                                idx[i] = index % instrides[i+1] / instrides[i];
+                            }
+                            std::vector<size_t> outidx = _get_transpose_vec_rev(idx , revperm);
+                            size_t outindex = 0;
+                            for(int i = 0;i<ndim;i++){
+                                outindex += outidx[i] * strides[i];
+                            }
+                            result.get()[outindex] = grad_out.get()[index];
+                        }
+                    }
+
+                    return {result};
                 }
                 std::vector<Tensor<T>> get_inputs() const override{
                     return {a};
@@ -1473,15 +1598,12 @@ namespace nn{
                             break;
                         }
                     }
-                    if(is_valid){
-                        size_t im_offset = 0;
-                        for(int i = 0;i<ndim;i++){
-                            im_offset *= imshape[i];
-                            im_offset += kernel_index[i];
-                        }
-                        col[col_offset] =  im[im_offset];
-
+                    size_t im_offset = 0;
+                    for(int i = 0;i<ndim;i++){
+                        im_offset *= imshape[i];
+                        im_offset += kernel_index[i];
                     }
+                    col[col_offset] =  is_valid ? im[im_offset] : 0;
                     grid_index.next();
                     grid_offset++;
                     col_offset++;
@@ -1513,13 +1635,9 @@ namespace nn{
                         size_t kernel_index[2];
                         kernel_index[0] = grid_min[0] + grid_index[0]; 
                         kernel_index[1] = grid_min[1] + grid_index[1];
-                        if( kernel_index[0] >= imshape[0] || kernel_index[1] >= imshape[1]){
-                            is_valid = false;
-                        }
-                        if(is_valid){
-                            size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                            col[col_offset] =  im[im_offset];
-                        }
+                        is_valid = kernel_index[0] < imshape[0] && kernel_index[1] < imshape[1];
+                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
+                        col[col_offset] =  is_valid ? im[im_offset] : 0;
                         grid_offset++;
                         col_offset++;
                     }
@@ -1553,14 +1671,12 @@ namespace nn{
                             break;
                         }
                     }
-                    if(is_valid){
-                        size_t im_offset = 0;
-                        for(int i = 0;i<ndim;i++){
-                            im_offset *= imshape[i];
-                            im_offset += kernel_index[i];
-                        }
-                        col[col_offset] =  im[im_offset];
+                    size_t im_offset = 0;
+                    for(int i = 0;i<ndim;i++){
+                        im_offset *= imshape[i];
+                        im_offset += kernel_index[i];
                     }
+                    col[col_offset] =  is_valid ? im[im_offset] : 0;
                     grid_index.next();
                     grid_offset++;
                     col_offset+=imsize;
@@ -1592,13 +1708,9 @@ namespace nn{
                         size_t kernel_index[2];
                         kernel_index[0] = grid_min[0] + grid_index[0]; 
                         kernel_index[1] = grid_min[1] + grid_index[1];
-                        if( kernel_index[0] >= imshape[0] || kernel_index[1] >= imshape[1]){
-                            is_valid = false;
-                        }
-                        if(is_valid){
-                            size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                            col[col_offset] =  im[im_offset];
-                        }
+                        is_valid = kernel_index[0] < imshape[0] && kernel_index[1] < imshape[1];
+                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
+                        col[col_offset] =  is_valid ? im[im_offset] : 0;
                         grid_offset++;
                         col_offset+= imsize;
                     }
@@ -1876,21 +1988,12 @@ namespace nn{
 
     }
     template <typename T>
-    void __cudaMemcpyBatch(T * dst , const T * src ,const size_t size , const size_t batch_size){
-        constexpr int streamCount = 8;
-        cudaStream_t streams[streamCount];
+    void __cudaMemcpyBatch(T * dst , const T * src ,const size_t size , const size_t batch_size , cudaStream_t * streams ){
 
-        for(int i = 0;i<streamCount;i++){
-            CHECK(cudaStreamCreate(&streams[i]));
-        }
         for(size_t b = 0;b < batch_size;b ++){
-            int s = b % streamCount;
+            int s = b % kStreamCount;
             cudaMemcpyAsync(dst + b * size, src , size * sizeof(T) , cudaMemcpyDeviceToDevice , streams[s]);
 
-        }
-        for(int i = 0;i < streamCount;i++){
-            CHECK(cudaStreamSynchronize(streams[i]));
-            CHECK(cudaStreamDestroy(streams[i]));
         }
     }
     template <typename T>
@@ -1907,6 +2010,9 @@ namespace nn{
             Tensor<T> weight_t;
             Tensor<T> bias;
             Tensor<T> input_cache; // internal backward
+            cudaStream_t stream_gemm,stream_add;
+            cublasHandle_t handle;
+            cudaStream_t streams[kStreamCount];
         public:
             Linear(const Tensor<T> & weight, const Tensor<T> & bias)
             : weight(weight), bias(bias) {
@@ -1922,10 +2028,32 @@ namespace nn{
                     std::cerr << "Linear: weight shape and bias shape mismatch" << std::endl;
                     throw std::runtime_error("Linear: weight shape and bias shape mismatch");
                 }
+                cublasCreate(&handle);
+                cudaStreamCreate(&stream_gemm);
+                cudaStreamCreate(&stream_add);
+                cublasSetStream(handle , stream_gemm);
+                for(int i = 0;i<kStreamCount;i++){
+                    CHECK(cudaStreamCreate(&streams[i]));
+                }
             }
             Linear(const size_t in_features, const size_t out_features, Device device = DefaultDevice){
                 weight = randn<T>({out_features , in_features} , device);
                 bias = randn<T>({out_features} , device) ;
+                cublasCreate(&handle);
+                cudaStreamCreate(&stream_gemm);
+                cudaStreamCreate(&stream_add);
+                cublasSetStream(handle , stream_gemm);
+                for(int i = 0;i<kStreamCount;i++){
+                    CHECK(cudaStreamCreate(&streams[i]));
+                }
+            }
+            ~Linear(){
+                cublasDestroy(handle);
+                cudaStreamDestroy(stream_gemm);
+                cudaStreamDestroy(stream_add);
+                for(int i = 0;i<kStreamCount;i++){
+                    CHECK(cudaStreamDestroy(streams[i]));
+                }
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                 if(inputs.size() != 1){
@@ -1957,11 +2085,9 @@ namespace nn{
                 if(result.device() == Cuda){
                     weight.to(Cuda);
                     bias.to(Cuda);
-                    cublasHandle_t handle;
-                    cublasCreate(&handle);
                     T alpha = 1.0f;
                     T beta = 1.0f;
-                    __cudaMemcpyBatch(result.get() , bias.get() , stepresult , result.size() / stepresult);
+                    __cudaMemcpyBatch(result.get() , bias.get() , stepresult , result.size() / stepresult , streams);
 
                     auto batch_size = result.size() / stepresult;
 
@@ -2042,19 +2168,13 @@ namespace nn{
                 size_t stepinput = inputstrides[1];
                 size_t stepgradout = gradoutstrides[1];
                 if(input.device() == Cuda){
-                    cublasHandle_t handle;
-                    cublasCreate(&handle);
                     T alpha = 1.0f;
                     T beta = 1.0f;
 
-                    cudaStream_t stream_gemm,stream_add;
-                    cudaStreamCreate(&stream_gemm);
-                    cudaStreamCreate(&stream_add);
 
 
                     for(size_t inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
                         
-                        cublasSetStream(handle , stream_gemm);
                         if constexpr (std::is_same_v<T , float>){
                             CHECK_CUBLAS(
                             cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
@@ -2133,9 +2253,6 @@ namespace nn{
                             grad_out.size() / stepgradout
                         ));
                     }
-                    CHECK(cudaStreamDestroy(stream_add));
-                    CHECK(cudaStreamDestroy(stream_gemm));
-                    cublasDestroy(handle);
 
                 }
                 else{
@@ -2167,23 +2284,97 @@ namespace nn{
                 return {weight , bias};
             }
     };
+
+    template <typename T>
+    __global__ void _conv2d_forward_kernel(T * output , const T * input , const T * kernel , const size_t h , const size_t w , const size_t kernel_size , const size_t imsize){
+        int index = threadIdx.x + blockIdx.x * blockDim.x;
+        if(index < imsize){
+            int x = index % w;
+            int y = index / w;
+            int x_start = x - kernel_size / 2;
+            int y_start = y - kernel_size / 2;
+            T sum = 0;
+            for(int i = 0;i<kernel_size;i++){
+                for(int j = 0;j<kernel_size;j++){
+                    if(x_start + i >= 0 && x_start + i < w && y_start + j >= 0 && y_start + j < h){
+                        sum += input[(y_start + j) * w + (x_start + i)] * kernel[i * kernel_size + j];
+                    }
+                }
+            }
+            output[index] = sum;
+        }
+    }
     enum PaddingMode{
         NoPadding,
         ZeroPadding
     };
+
     template <typename T>
     class Conv : public Module<T>{
         private:
             Tensor<T> kernel_;
             Tensor<T> input_cache;
             PaddingMode padding_mode;
+            std::vector<size_t> single_kernel_shape;
+            std::vector<size_t> kernelstride;
+            size_t single_kernel_size;
+            std::vector<size_t> half_kernel_shape;
+            T * im2col_buf[2];
+            size_t im2col_size_prev;
+            cublasHandle_t handle;
+            cudaStream_t stream_im2col, stream_gemm;
+            cudaEvent_t ev[2];
         public:
+            ~Conv(){
+                if(im2col_buf[0] != nullptr){
+                    CHECK(cudaFree(im2col_buf[0]));
+                    CHECK(cudaFree(im2col_buf[1]));
+                }
+                CHECK(cudaStreamSynchronize(stream_gemm));
+                CHECK(cudaStreamSynchronize(stream_im2col));
+                CHECK(cudaStreamDestroy(stream_gemm));
+                CHECK(cudaStreamDestroy(stream_im2col));
+                cublasDestroy(handle);
+            }
 
             Conv(const Tensor<T> & kernel , PaddingMode padding_mode = ZeroPadding)
-            : kernel_(kernel) , padding_mode(padding_mode) {}
+            : kernel_(kernel) , padding_mode(padding_mode) {
+                im2col_buf[0] = nullptr;
+                im2col_buf[1] = nullptr;
+                im2col_size_prev = 0;
+                cublasCreate(&handle);
+                cudaStreamCreate(&stream_im2col);
+                cudaStreamCreate(&stream_gemm);
+                cudaEventCreate(&ev[0]);
+                cudaEventCreate(&ev[1]);
+                cublasSetStream(handle , stream_gemm);
+                kernelstride = kernel_.get_strides();
+                single_kernel_shape = std::vector<size_t>(kernel_.shape().begin()+2 , kernel_.shape().end());
+                single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                half_kernel_shape = single_kernel_shape;
+                for(int i = 0;i<half_kernel_shape.size();i++){
+                    half_kernel_shape[i] /= 2;
+                }
+            }
             Conv(const std::vector<size_t> & kernel_shape,
                 PaddingMode padding_mode = ZeroPadding , Device device = DefaultDevice) : padding_mode(padding_mode) {
+                im2col_buf[0] = nullptr;
+                im2col_buf[1] = nullptr;
+                im2col_size_prev = 0;
+                cublasCreate(&handle);
+                cudaStreamCreate(&stream_im2col);
+                cudaStreamCreate(&stream_gemm);
+                cudaEventCreate(&ev[0]);
+                cudaEventCreate(&ev[1]);
+                cublasSetStream(handle , stream_gemm);
                 kernel_ = randn<T>(kernel_shape , device);
+                kernelstride = kernel_.get_strides();
+                single_kernel_shape = std::vector<size_t>(kernel_.shape().begin()+2 , kernel_.shape().end());
+                single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                half_kernel_shape = single_kernel_shape;
+                for(int i = 0;i<half_kernel_shape.size();i++){
+                    half_kernel_shape[i] /= 2;
+                }
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                 auto input = inputs[0];
@@ -2213,31 +2404,26 @@ namespace nn{
 
                 std::vector<size_t> resultstride = result.get_strides();
                 auto inputstride = input.get_strides();
-                auto kernelstride = kernel_.get_strides();
-                std::vector<size_t> single_kernel_shape(kernel_.shape().begin()+2 , kernel_.shape().end());
                 std::vector<size_t> single_input_shape(input.shape().begin()+2 , input.shape().end());
                 std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
-                std::vector<size_t> single_output_stride(resultstride.begin() , resultstride.end() - 2);
                 if(result.device() == Cuda){
                     //ready for pipeline
-                    cublasHandle_t handle;
-                    cublasCreate(&handle);
-                    cudaStream_t stream_im2col, stream_gemm;
-                    cudaStreamCreate(&stream_im2col);
-                    cudaStreamCreate(&stream_gemm);
 
-                    cudaEvent_t ev[2];
-                    cudaEventCreate(&ev[0]);
-                    cudaEventCreate(&ev[1]);
 
-                    T * im2col_buf[2];
-
-                    auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
                     size_t single_input_size = Functional::prod_vec(single_input_shape);
                     size_t im2col_size = single_input_size * single_kernel_size * sizeof(T);
-
-                    CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
-                    CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+                    if(im2col_buf[0] == nullptr){
+                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+                        im2col_size_prev = im2col_size;
+                    }
+                    else if(im2col_size_prev != im2col_size){
+                        CHECK(cudaFree(im2col_buf[0]));
+                        CHECK(cudaFree(im2col_buf[1]));
+                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+                        im2col_size_prev = im2col_size;
+                    }
 
                     T alpha = 1.0f;
                     T beta = 1.0f;
@@ -2245,19 +2431,9 @@ namespace nn{
                     size_t iter = 0;
 
                     //preprocessing
-                    auto half_kernel_shape = single_kernel_shape;
                     auto instride = single_input_stride;
                     auto revinstride = instride;
                     std::reverse(revinstride.begin() , revinstride.end());
-                    for(int i = 0;i<half_kernel_shape.size();i++){
-                        half_kernel_shape[i] /= 2;
-                    }
-                    std::vector<size_t> kernel_stride = {};
-                    size_t kernel_stride_ = 1;
-                    for(int i = 0;i<single_kernel_shape.size();i++){
-                        kernel_stride.push_back(kernel_stride_);
-                        kernel_stride_ *= single_kernel_shape[single_kernel_shape.size() - 1 - i];
-                    }
                     cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
                     cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
                     size_t inputbatchoffset , resultbatchoffset , resultoutoffset , kerneloutoffset , inputinoffset , kernelinoffset;
@@ -2273,7 +2449,6 @@ namespace nn{
                                     ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
 
                                         Functional::im2col_gpu_2d<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
                                         (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
@@ -2283,7 +2458,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                                                     1 , 
@@ -2325,7 +2499,6 @@ namespace nn{
                             }
 
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
@@ -2357,7 +2530,6 @@ namespace nn{
                                     1
                                 ));
                             }
-
                         }
                         else{
 
@@ -2369,7 +2541,6 @@ namespace nn{
                                     ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
 
                                         Functional::im2col_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
                                         (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
@@ -2380,7 +2551,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                                                     1 , 
@@ -2423,9 +2593,6 @@ namespace nn{
                             }
 
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
-                            std::cout << single_input_size << " " << single_kernel_size << " " << std::endl;
-                            std::cout << prev_kerneloutoffset << " " << prev_kernelinoffset << " " << prev_resultoutoffset << " " << prev_resultbatchoffset << std::endl;
                             
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
@@ -2486,7 +2653,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                                                     1 , 
@@ -2528,7 +2694,6 @@ namespace nn{
                             }
 
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             if constexpr (std::is_same_v<T , float>){
 
                                 CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
@@ -2581,7 +2746,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                                                     1 , 
@@ -2623,7 +2787,6 @@ namespace nn{
                             }
 
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                                     1 , 
@@ -2657,15 +2820,9 @@ namespace nn{
 
                         }
                     }
-                    CHECK(cudaStreamSynchronize(stream_gemm));
-                    CHECK(cudaStreamSynchronize(stream_im2col));
-                    CHECK(cudaStreamDestroy(stream_gemm));
-                    CHECK(cudaStreamDestroy(stream_im2col));
-                    cublasDestroy(handle);
-                    CHECK(cudaFree(im2col_buf[0]));
-                    CHECK(cudaFree(im2col_buf[1]));
                 }
                 else{
+                    std::vector<size_t> single_output_stride(resultstride.begin() , resultstride.end() - 2);
                     for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
                         ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
                             for(size_t resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
@@ -2710,43 +2867,36 @@ namespace nn{
                 Tensor<T>  grad_kernel(kernel_.shape() , kernel_.device());
                 Tensor<T>  grad_input(input.shape() , input.device());
                 if(grad_kernel.device() == Cuda){
-                    cublasHandle_t handle;
-                    cublasCreate(&handle);
-                    cudaStream_t stream_im2col, stream_gemm;
-                    cudaStreamCreate(&stream_im2col);
-                    cudaStreamCreate(&stream_gemm);
-
-                    cudaEvent_t ev[2];
-                    cudaEventCreate(&ev[0]);
-                    cudaEventCreate(&ev[1]);
-
-                    T * im2col_buf[2];
 
                     auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
                     size_t single_input_size = Functional::prod_vec(single_input_shape);
                     size_t im2col_size = single_input_size * single_kernel_size * sizeof(T);
 
-                    CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
-                    CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+                    if(im2col_buf[0] == nullptr){
+                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+                        im2col_size_prev = im2col_size;
+                    }
+                    else if(im2col_size_prev != im2col_size){
+                        CHECK(cudaFree(im2col_buf[0]));
+                        CHECK(cudaFree(im2col_buf[1]));
+                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
+                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
+                        im2col_size_prev = im2col_size;
+                    }
 
                     T alpha = 1.0f;
                     T beta = 1.0f;
+                    T beta0 = 0;
 
                     size_t iter = 0;
 
                     //preprocessing
-                    auto half_kernel_shape = single_kernel_shape;
                     auto instride = single_input_stride;
                     auto revinstride = instride;
                     std::reverse(revinstride.begin() , revinstride.end());
                     for(int i = 0;i<half_kernel_shape.size();i++){
                         half_kernel_shape[i] /= 2;
-                    }
-                    std::vector<size_t> kernel_stride = {};
-                    size_t kernel_stride_ = 1;
-                    for(int i = 0;i<single_kernel_shape.size();i++){
-                        kernel_stride.push_back(kernel_stride_);
-                        kernel_stride_ *= single_kernel_shape[single_kernel_shape.size() - 1 - i];
                     }
                     cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
                     cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
@@ -2763,7 +2913,6 @@ namespace nn{
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
 
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
 
                                         Functional::im2col_gpu_2d_t<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
                                         (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
@@ -2773,7 +2922,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                                     , 1 , single_kernel_size , single_input_size
@@ -2796,7 +2944,6 @@ namespace nn{
                                 }
                             }
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                     , 1 , single_kernel_size , single_input_size
@@ -2823,13 +2970,11 @@ namespace nn{
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
 
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
-                                        CHECK_CUBLAS(cublasSetStream(handle , stream_gemm));
                                         if constexpr (std::is_same_v<T , float>){
                                             CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , single_input_size , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             ));
                                         }
@@ -2837,7 +2982,7 @@ namespace nn{
                                             CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , single_input_size , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             ));
 
@@ -2874,7 +3019,6 @@ namespace nn{
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
 
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
                                         Functional::im2col_gpu_t<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
                                         (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
                                         single_kernel_size , single_input_shape.size()
@@ -2883,7 +3027,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                                     , 1 , single_kernel_size , single_input_size
@@ -2906,7 +3049,6 @@ namespace nn{
                                 }
                             }
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                     , 1 , single_kernel_size , single_input_size
@@ -2934,13 +3076,11 @@ namespace nn{
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
 
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
-                                        CHECK_CUBLAS(cublasSetStream(handle , stream_gemm));
                                         if constexpr (std::is_same_v<T , float>){
                                             CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , single_input_size , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             ));
                                         }
@@ -2948,7 +3088,7 @@ namespace nn{
                                             CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , single_input_size , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             ));
                                         }
@@ -3000,7 +3140,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                                     , 1 , single_kernel_size , reduce_imsize
@@ -3023,7 +3162,6 @@ namespace nn{
                                 }
                             }
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                     , 1 , single_kernel_size , reduce_imsize
@@ -3050,14 +3188,12 @@ namespace nn{
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
 
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
-                                        CHECK_CUBLAS(cublasSetStream(handle , stream_gemm));
                                         if constexpr (std::is_same_v<T , float>){
                                             CHECK_CUBLAS(
                                             cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , reduce_imsize , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             ));
                                         }
@@ -3066,7 +3202,7 @@ namespace nn{
                                             cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , reduce_imsize , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             ));
                                         }
@@ -3110,7 +3246,6 @@ namespace nn{
                                         
                                         if(iter > 0){
                                             cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            cublasSetStream(handle , stream_gemm);
                                             if constexpr (std::is_same_v<T , float>){
                                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                                     , 1 , single_kernel_size , reduce_imsize
@@ -3133,7 +3268,6 @@ namespace nn{
                                 }
                             }
                             cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            cublasSetStream(handle , stream_gemm);
                             if constexpr (std::is_same_v<T , float>){
                                 CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
                                     , 1 , single_kernel_size , reduce_imsize
@@ -3160,13 +3294,11 @@ namespace nn{
                                         size_t cur = iter & 1;
                                         size_t prev = (iter + 1) & 1;
 
-                                        CHECK(cudaMemset(im2col_buf[cur] , 0 , im2col_size));
-                                        CHECK_CUBLAS(cublasSetStream(handle , stream_gemm));
                                         if constexpr (std::is_same_v<T , float>){
                                             cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , reduce_imsize , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             );
                                         }
@@ -3174,7 +3306,7 @@ namespace nn{
                                             cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
                                                 ,single_kernel_size , reduce_imsize , 1
                                                 , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta ,
+                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
                                                 im2col_buf[cur] , single_kernel_size
                                             );
                                         }
@@ -3203,13 +3335,6 @@ namespace nn{
 
                     }
 
-                    CHECK(cudaStreamSynchronize(stream_im2col));
-                    CHECK(cudaStreamSynchronize(stream_gemm));
-                    CHECK(cudaStreamDestroy(stream_gemm));
-                    CHECK(cudaStreamDestroy(stream_im2col));
-                    cublasDestroy(handle);
-                    CHECK(cudaFree(im2col_buf[0]));
-                    CHECK(cudaFree(im2col_buf[1]));
                 }
                 else{
                     for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
@@ -3367,29 +3492,53 @@ namespace nn{
         grad_input[index] = (input_softmax[index] - (label_cache[index / step] == index % step)) * grad_out[0] / batchsize;
     }
 
+    template <typename T>
+    __global__ void _cross_entropy_forward_kernel(T * loss , const T * input_softmax , const size_t * label_cache , const size_t batchsize , const size_t step){
+        int index = blockIdx.x * blockDim.x + threadIdx.x;
+        extern __shared__ char smem[];
+        T * smem_ce = reinterpret_cast<T *>(smem);
+        int warpId = threadIdx.x / 32;
+        int laneId = threadIdx.x % 32;
+        int warpsPerBlock = blockDim.x / 32;
+        T l;
+        if constexpr (std::is_same_v<T , float>){
+            l = index < batchsize ? -logf(input_softmax[index * step + label_cache[index]]) : 0;
+        }
+        else if constexpr (std::is_same_v<T , double>){
+            l = index < batchsize ? -log(input_softmax[index * step + label_cache[index]]) : 0;
+        }
+        l = warpReduceSum(l); // sum in warp
+        if(laneId == 0){
+            smem_ce[warpId] = l;
+        }
+        __syncthreads();
+        if(threadIdx.x == 0){
+            float val = smem_ce[0];
+            for(int i = 1;i < warpsPerBlock;i++){
+                val += smem_ce[i];
+            }
+            atomicAdd(loss , val);
+        }
+    }
+    template <typename T>
+    __global__ void divideSingleElement(T * loss , const T batchsize){
+        loss[0] /= batchsize;
+    }
+
 
     template <typename T>
     class CrossEntropy : public Module<T>{
         private:
             Softmax<T> softmax;
             Tensor<T> input_cache , input_softmax_cache;
-            std::vector<size_t> label_cache_;
+            cuda_shared_pointer<size_t> label_cache_;
         public:
-            CrossEntropy(const std::vector<size_t> & label_cache) : label_cache_(label_cache){}
+            CrossEntropy(const std::vector<size_t> & label_cache) {
+                label_cache_ = cuda_shared_pointer<size_t>(label_cache , DefaultDevice);
+            }
             CrossEntropy(const Tensor<T> & label_cache){
-                label_cache_ = std::vector<size_t>(label_cache.size());
-                if(label_cache.device() == Cpu ){
-                    for(int i = 0;i < label_cache_.size();i++){
-                        label_cache_[i] = (size_t)label_cache.get()[i];
-                    }
-                }
-                else{
-                    auto tmp = label_cache.deepcopy();
-                    tmp.to(Cpu);
-                    for(int i = 0;i < label_cache_.size();i++){
-                        label_cache_[i] = (size_t)tmp.get()[i];
-                    }
-                }
+                auto label_cache_tensor = label_cache.deepcopy();
+                label_cache_ = label_cache_tensor.get_shared_ptr();
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                 if(inputs.size()!= 1){
@@ -3398,18 +3547,25 @@ namespace nn{
                 }
                 auto input = inputs[0];
                 auto input_softmax = softmax(input);
-                input_softmax.to(Cpu);
                 if(input.requires_grad()){
                     input_cache = input;
                     input_softmax_cache = input_softmax;
                 }
-                Tensor<T> loss(T(0));
+                Tensor<T> loss(T(0) , {1} , input.device());
                 size_t batchsize = input.size() / input.shape().back();
                 size_t step = input.shape().back();
-                for(size_t i = 0;i < batchsize;i++){
-                    loss.get()[0] += -log(input_softmax.get()[i * step + label_cache_[i]]);
+                if(input.device() == Cpu){
+                    for(size_t i = 0;i < batchsize;i++){
+                        loss.get()[0] += -log(input_softmax.get()[i * step + label_cache_.get()[i]]);
+                    }
+                    loss.get()[0] /= batchsize;
                 }
-                loss.get()[0] /= batchsize;
+                else{
+                    _cross_entropy_forward_kernel<<<CudaGetBlocks(batchsize) , kCudaThreadsNum>>>(
+                        loss.get() , input_softmax.get() , label_cache_.get() , batchsize , step
+                    );
+                    divideSingleElement<T><<<1 , 1>>>(loss.get() , batchsize);
+                }
                 if(input.requires_grad()){
                     loss.set_requires_grad(true);
                     loss.set_grad_fn(
@@ -3487,6 +3643,32 @@ namespace nn{
             std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
                 return sigmoid_func->backward(grad_out);
             }
+    };
+
+    template <typename T>
+    class BatchNorm : Module<T>{
+        size_t c;
+        Tensor<T> gamma , beta;
+        Tensor<T> running_mean , running_var;
+        Tensor<T> input_cache;
+        public:
+            BatchNorm(const size_t num_features , Device device = DefaultDevice) : c(num_features){
+                gamma = ones({c} , device);
+                beta = zeros({c} , device);
+                running_mean = zeros({c} , device);
+                running_var = ones({c} , device);
+            }
+            Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+                if(inputs.size() != 1){
+                    std::cerr << "BatchNorm forward input size must be 1" << std::endl;
+                    throw std::runtime_error("BatchNorm forward input size must be 1");
+                }
+                auto input = inputs[0];
+                if(input.requires_grad() && !training){
+                    input_cache = input;
+                }
+            }
+
     };
 
 }

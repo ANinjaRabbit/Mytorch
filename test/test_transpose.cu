@@ -4,19 +4,14 @@
 using namespace mytorch;
 int main(){
     DefaultDevice = Cuda;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    auto x = arange<float>(0 , 17 * 17 , 1).reshape({17 , 17});
-    x.print();
+    auto x = randn<float>({3 , 3 , 3});
     x.set_requires_grad(true);
-    cudaEventRecord(start);
-    auto y = x.transpose({1 , 0});
-    y.backward();
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+    x.print();
+    auto y = x.transpose({2 , 0 , 1});
     y.print();
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << "Transpose time: " << milliseconds << " ms" << std::endl;
+    y.zero_grad();
+    auto last_grad = randn<float>({3 , 3 , 3});
+    last_grad.print();
+    y.backward(last_grad);
+    x.get_grad_tensor().print();
 }
