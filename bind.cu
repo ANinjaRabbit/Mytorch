@@ -173,6 +173,26 @@ void bind_module(py::module &m_mod) {
         "Sigmoid activation module.")
         .def(py::init<>());
     
+    py::class_<BatchNorm2d<T> , Module<T> , std::shared_ptr<BatchNorm2d<T>>>(m_mod, "BatchNorm2d",
+        "Batch normalization layer for 2D input (e.g., images).")
+        .def(py::init([](const int num_features  , py::object momentum_obj, py::object device_obj){
+            T momentum = momentum_obj.is_none() ? T(0.1) : momentum_obj.cast<T>();
+            Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+            return std::make_shared<BatchNorm2d<T>>(num_features , momentum , device);
+        }) , py::arg("num_features") , py::arg("momentum") = py::none() , py::arg("device") = py::none());
+
+    py::class_<Sequential<T> , Module<T> , std::shared_ptr<Sequential<T>>>(m_mod, "Sequential",
+        "Container for a sequence of modules.")
+        .def(py::init([](std::vector<std::shared_ptr<Module<T>>> &modules){
+            return std::make_shared<Sequential<T>>(modules);
+        }) , py::arg("modules"))
+        .def("set_train" , &Sequential<T>::set_train , py::arg("train") = true);
+    
+    py::class_<Flatten<T> , Module<T> , std::shared_ptr<Flatten<T>>>(m_mod, "Flatten",
+        "Flatten layer to convert multi-dimensional input to a 1D vector.")
+        .def(py::init<int , int>() , py::kw_only() , py::arg("start_dim") = 0 , py::arg("end_dim") = -1);
+
+    
 }
 
 template <typename T>

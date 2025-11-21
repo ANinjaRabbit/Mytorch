@@ -3,6 +3,7 @@
 
 #include "tensor.cuh"
 #include <cublas_v2.h>
+#include <cmath>
 
 namespace mytorch{
 namespace nn{
@@ -28,6 +29,40 @@ namespace nn{
                 return {}; // default no backward
             }
             virtual std::vector<Tensor<T>> parameters(){return {};};
+            virtual void set_train(bool train){
+                training = train;
+            }
+    };
+
+    template <typename T>
+    class Sequential : public Module<T>{
+        private:
+            std::vector<std::shared_ptr<Module<T>>> modules_;
+        public:
+            Sequential(const std::vector<std::shared_ptr<Module<T>>> & modules){
+                modules_ = modules;
+            }
+            Tensor<T> forward(const std::vector<Tensor<T>> & input){
+                Tensor<T> output = input[0];
+                for(auto & module : modules_){
+                    output = module->forward({output});
+                }
+                return output;
+            }
+            std::vector<Tensor<T>> parameters() override{
+                std::vector<Tensor<T>> params;
+                for(auto & module : modules_){
+                    auto module_params = module->parameters();
+                    params.insert(params.end() , module_params.begin() , module_params.end());
+                }
+                return params;
+            }
+            void set_train(bool train){
+                training = train;
+                for(auto & module : modules_){
+                    module->set_train(train);
+                }
+            }
     };
 
     
@@ -2036,7 +2071,7 @@ namespace nn{
                 }
             }
             Linear(const size_t in_features, const size_t out_features, Device device = DefaultDevice){
-                weight = randn<T>({out_features , in_features} , device);
+                weight = randn<T>({out_features , in_features} , device) * rsqrt(in_features / (T)2);
                 bias = randn<T>({out_features} , device) ;
                 cublasCreate(&handle);
                 cudaStreamCreate(&stream_gemm);
@@ -2346,10 +2381,10 @@ namespace nn{
                 cudaEventCreate(&ev[0]);
                 cudaEventCreate(&ev[1]);
                 cublasSetStream(handle , stream_gemm);
-                kernel_ = randn<T>(kernel_shape , device);
-                kernelstride = kernel_.get_strides();
-                single_kernel_shape = std::vector<size_t>(kernel_.shape().begin()+2 , kernel_.shape().end());
+                single_kernel_shape = std::vector<size_t>(kernel_shape.begin()+2 , kernel_shape.end());
                 single_kernel_size = Functional::prod_vec(single_kernel_shape);
+                kernel_ = randn<T>(kernel_shape , device) * rsqrt(single_kernel_size / (T)2);
+                kernelstride = kernel_.get_strides();
                 half_kernel_shape = single_kernel_shape;
                 for(int i = 0;i<half_kernel_shape.size();i++){
                     half_kernel_shape[i] /= 2;
@@ -2375,7 +2410,7 @@ namespace nn{
 
                 if(padding_mode == NoPadding){
                     for(size_t i = 2;i<resultshape.size();i++){
-                        resultshape[i] -= (kernel_.shape()[i] / 2) + 1;
+                        resultshape[i] -= (kernel_.shape()[i] - (kernel_.shape()[i] & 1));
                     }
                 }
 
@@ -3947,6 +3982,29 @@ namespace nn{
                 return {gamma , beta};
             }
 
+    };
+
+    template <typename T>
+    class Flatten : public Module<T>{
+        int start_dim;
+        int end_dim;
+        public:
+            Flatten(int start_dim = 0 , int end_dim = -1) : start_dim(start_dim) , end_dim(end_dim){ }
+            Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+                auto input = inputs[0];
+                auto shape = input.shape();
+                int newsize = 1;
+                if(end_dim == -1){
+                    end_dim = shape.size() - 1;
+                }
+                for(int i = start_dim;i <= end_dim;i++){
+                    newsize *= shape[i];
+                }
+                std::vector<size_t> newshape(shape.begin() , shape.begin() + start_dim);
+                newshape.push_back(newsize);
+                newshape.insert(newshape.end() , shape.begin() + end_dim + 1 , shape.end());
+                return input.reshape(newshape);
+            }
     };
 
 }

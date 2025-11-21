@@ -8,32 +8,37 @@ using namespace mytorch;
 
 int main(){
     DefaultDevice = Cuda;
-    auto X = randn<float>({10 , 10});
+    auto X = rand<float>({10 , 1 , 28 , 28});
     X.set_requires_grad(true);
-    auto y = randn<float>({10 , 1});
-    auto model = nn::Linear<float>(10 , 10);
-    auto model2 = nn::Linear<float>(10 , 1);
-    std::vector<Tensor<float>> params;
-    auto params1 = model.parameters();
-    auto params2 = model2.parameters();
-    params.insert(params.end() , params1.begin() , params1.end());
-    params.insert(params.end() , params2.begin() , params2.end());
+    auto y = rand<float>({10 ,10});
+    auto model = nn::Sequential<float>({
+        std::make_shared<nn::Conv<float>>(std::vector<size_t>{6 , 1 , 5 , 5} , nn::NoPadding) ,
+        std::make_shared<nn::Pool2d<float>>(std::vector<size_t>{2 , 2}) ,
+        std::make_shared<nn::Conv<float>>(std::vector<size_t>{16 , 6 , 5 , 5} , nn::NoPadding , Cuda) ,
+        std::make_shared<nn::Pool2d<float>>(std::vector<size_t>{2 , 2}) ,
+        std::make_shared<nn::Flatten<float>>(1) ,
+        std::make_shared<nn::Linear<float>>(4 * 4 * 16 , 120) ,
+        std::make_shared<nn::Linear<float>>(120 , 84) ,
+        std::make_shared<nn::Linear<float>>(84 , 10)
+    });
+    auto params = model.parameters();
 
-    auto optimizer = optim::SGD<float>(params , 0.001);
+    auto optimizer = optim::Adam<float>(params, 0.001);
     cudaEvent_t start , stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
-    for(int i = 0 ; i < 100 ; i++){
+    for(int i = 0 ; i < 1000 ; i++){
         std::cout << "Iteration " << i << " ";
-        auto y_pred = model2(model(X));
+        auto y_pred = model(X);
         auto loss = (y_pred - y);
         loss = loss * loss;
         loss = loss.sum(1);
         loss.zero_grad();
         loss.backward();
-        std::cout << "loss " << loss.item() << "\n";
         optimizer.step();
+        std::cout << "loss " <<std::fixed<< loss.item() << "\n";
+
     }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
