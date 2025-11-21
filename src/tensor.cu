@@ -190,6 +190,7 @@ namespace mytorch{
     }
     namespace nn{
         __device__ float warpReduceMax(float val) {
+            #pragma unroll
             for (int offset = 16; offset > 0; offset /= 2) {
                 val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
             }
@@ -197,18 +198,21 @@ namespace mytorch{
         }
 
         __device__ float warpReduceSum(float val) {
+            #pragma unroll
             for (int offset = 16; offset > 0; offset /= 2) {
                 val += __shfl_down_sync(0xFFFFFFFF, val, offset);
             }
             return val;
         }
         __device__ double warpReduceMax_double(double val) {
+            #pragma unroll
             for (int offset = 16; offset > 0; offset /= 2) {
                 val = fmax(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
             }
             return val;
         }
         __device__ double warpReduceSum_double(double val) {
+            #pragma unroll
             for (int offset = 16; offset > 0; offset /= 2) {
                 val += __shfl_down_sync(0xFFFFFFFF, val, offset);
             }

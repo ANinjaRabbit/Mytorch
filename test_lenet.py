@@ -1,5 +1,5 @@
 import sys 
-sys.path.append("../build/Release/")
+sys.path.append("/build/Release/")
 import mytorch
 
 
@@ -20,17 +20,19 @@ if __name__ == "__main__":
         mytorch.nn.Linear(84 , 10)]
     )
 
-    x = mytorch.ones((1 , 1 , 28 , 28))
+    x = mytorch.randn((10 , 1 , 28 , 28))
     x.set_requires_grad(True)
     print(lenet.parameters())
-    label = mytorch.ones((1 , 10))
-    optim = mytorch.optim.SGD(lenet.parameters() , 0.001)
+    label = mytorch.randn((10 , 10))
+    optim = mytorch.optim.Adam(lenet.parameters() , 0.001)
     
-    for i in range(10):
+    for i in range(100):
         y = lenet(x)
         loss = y - label
         loss = loss * loss
-        loss.print()
+        loss = loss.sum(1)
+        loss = loss.sum(0)
+        print(loss.item())
         loss.zero_grad()
         loss.backward()
         optim.step()

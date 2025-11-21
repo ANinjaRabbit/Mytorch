@@ -36,8 +36,3 @@ train_images = mytorch.tensor_from_numpy(load_mnist_images(train_images_path))
 train_labels = mytorch.tensor_from_numpy(load_mnist_labels(train_labels_path))
 test_images = mytorch.tensor_from_numpy(load_mnist_images(test_images_path))
 test_labels = mytorch.tensor_from_numpy(load_mnist_labels(test_labels_path))
-#test the shape
-print(train_images.shape())
-print(train_labels.shape())
-print(test_images.shape())
-print(test_labels.shape())
