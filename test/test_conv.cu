@@ -17,7 +17,7 @@ int main(){
 
 
 
-    auto conv = nn::Conv<float>({3 , 3 , 3 , 3} , nn::NoPadding);
+    auto conv = nn::Conv<float>({3 , 3 , 3 , 3});
     cudaEvent_t start , stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
