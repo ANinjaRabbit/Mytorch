@@ -107,7 +107,7 @@ namespace mytorch{
     do { \
         cublasStatus_t err = call; \
         if (err != CUBLAS_STATUS_SUCCESS) { \
-            fprintf(stderr, "cuBLAS Error: %d (line: %d) in file %s\n", err, __LINE__ , __FILE__); \
+            fprintf(stderr, "cuBLAS Error: %d (line: %d) in file %s\n", err , __LINE__ , __FILE__); \
             exit(EXIT_FAILURE); \
         } \
     } while (0)

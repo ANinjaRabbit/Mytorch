@@ -12,9 +12,9 @@ int main(){
     X.set_requires_grad(true);
     auto y = rand<float>({10 ,10});
     auto model = nn::Sequential<float>({
-        std::make_shared<nn::Conv<float>>(std::vector<size_t>{6 , 1 , 5 , 5} , nn::NoPadding) ,
+        std::make_shared<nn::Conv2d<float>>(1 , 6 ,5 , nn::NoPadding) ,
         std::make_shared<nn::Pool2d<float>>(std::vector<size_t>{2 , 2}) ,
-        std::make_shared<nn::Conv<float>>(std::vector<size_t>{16 , 6 , 5 , 5} , nn::NoPadding , Cuda) ,
+        std::make_shared<nn::Conv2d<float>>(6 , 16 , 5 , nn::NoPadding , Cuda) ,
         std::make_shared<nn::Pool2d<float>>(std::vector<size_t>{2 , 2}) ,
         std::make_shared<nn::Flatten<float>>(1) ,
         std::make_shared<nn::Linear<float>>(4 * 4 * 16 , 120) ,
@@ -23,7 +23,7 @@ int main(){
     });
     auto params = model.parameters();
 
-    auto optimizer = optim::Adam<float>(params, 0.001);
+    auto optimizer = optim::Adam<float>(params, 0.01);
     cudaEvent_t start , stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);

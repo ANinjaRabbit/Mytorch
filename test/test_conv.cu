@@ -11,44 +11,27 @@ int main(){
     DefaultDevice = Cuda;
 
     // correctness test
-    auto conv1 = nn::Conv<float>(randn<float>({3 , 3 , 5 , 5}) , nn::NoPadding);
-    auto a = randn<float>({3 , 3 , 6 , 6});
-    a.set_requires_grad(true);
+    auto conv1 = nn::Conv2d<float>(3 , 3 , 3 );
+    auto a = randn<float>({1 , 3 , 400 , 400});
 
-    auto b = conv1(a);
-    b.print();
-
-
-
-    auto conv = nn::Conv<float>({3 , 3 , 5 , 5} , nn::NoPadding);
+    float tot_time = 0;
     cudaEvent_t start , stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    a = randn<float>({3 , 3 , 6 , 6});
-    auto label = randn<float>({3 , 3 , 2 , 2});
-    a.set_requires_grad(true);
-    float total_time = 0;
-    auto optim = optim::Adam<float>(conv.parameters(), 0.001);
-    for(int i = 0;i<100;i++){
+    for(int i = 0;i < 100;i++){
+        std::cout << "Iteration " << i << " ";
         cudaEventRecord(start);
-        auto b = conv(a);
+        try{
+            auto b = conv1(a);
+        } catch (const std::exception& e) {
+            std::cerr << "Exception: " << e.what() << std::endl;
+        }
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
-        total_time += milliseconds;
-        auto loss = (b - label);
-        loss = loss * loss;
-        loss = loss.reshape({36});
-        loss = loss.sum(0);
-        std::cout << "loss " << loss.item() << "\n";
-        b.zero_grad();
-        b.backward();
-        optim.step();
+        tot_time += milliseconds;
+        std::cout << "Time: " << milliseconds << " ms\n";
     }
-    printf("Average Time: %f ms\n", total_time / 100);
-
-
-
-
+    printf("Time: %f ms\n", tot_time / 100);
 }

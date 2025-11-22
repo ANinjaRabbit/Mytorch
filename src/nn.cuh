@@ -35,6 +35,11 @@ namespace nn{
     };
 
     template <typename T>
+    __device__ T warpReduceMax(T val);
+    template <typename T>
+    __device__ T warpReduceSum(T val);
+
+    template <typename T>
     class Sequential : public Module<T>{
         private:
             std::vector<std::shared_ptr<Module<T>>> modules_;
@@ -1471,553 +1476,6 @@ namespace nn{
             }
             return sum;
         }
-        template<typename T>
-        __global__ void im2col_gpu_nopadding_t(T * col , const T * im , 
-            const size_t kernel_size , const size_t ndim , 
-            const size_t * kernel_shape ,  const size_t * imshape , 
-            const size_t imsize , const size_t reduce_imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < reduce_imsize){
-                size_t grid_min[kCudaMultiDimMax]; // index in image
-                for(size_t i = 0 , index_ = index;i<ndim;i++){
-                    size_t reduce_imshape = imshape[ndim - i - 1] - (kernel_shape[ndim - i - 1] >> 1) - 1;
-                    grid_min[ndim - 1 - i] = index_ % reduce_imshape;
-                    index_ /= reduce_imshape;
-                }
-
-                size_t grid_offset =  0;
-                size_t col_offset = index;
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    col[col_offset] =  im[im_offset];
-                    grid_index.next();
-                    grid_offset++;
-                    col_offset+=reduce_imsize;
-
-                }while(!grid_index.is_zero());
-
-            }
-        }
-
-        template<typename T>
-        __global__ void im2col_gpu_nopadding_2d_t(T * col , const T * im , 
-            const size_t kernel_size ,
-            const size_t * kernel_shape ,  const size_t * imshape , 
-            const size_t imsize , const size_t reduce_imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < reduce_imsize){
-                size_t grid_min[2]; // index in image
-                size_t reduce_imshape = imshape[1] - (kernel_shape[1] >> 1) - 1;
-                grid_min[1] = index % reduce_imshape;
-                grid_min[0] = index / reduce_imshape;
-
-
-                size_t grid_offset =  0;
-                size_t col_offset = index;
-                size_t kernel_index[2];
-                size_t grid_index[2];
-                for(grid_index[0] = 0;grid_index[0] < kernel_shape[0] ; grid_index[0] ++ ){
-                    for(grid_index[1] = 0;grid_index[1] < kernel_shape[1]; grid_index[1] ++){
-                        kernel_index[0] = grid_min[0] + grid_index[0];
-                        kernel_index[1] = grid_min[1] + grid_index[1];
-                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                        col[col_offset] =  im[im_offset];
-                        grid_offset++;
-                        col_offset+=reduce_imsize;
-                    } 
-                }
-
-            }
-        }
-
-        template<typename T>
-        __global__ void im2col_gpu_nopadding(T * col , const T * im , 
-            const size_t kernel_size , const size_t ndim , 
-            const size_t * kernel_shape ,  const size_t * imshape , 
-            const size_t imsize , const size_t reduce_imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < reduce_imsize){
-                size_t grid_min[kCudaMultiDimMax]; // index in image
-                for(size_t i = 0 , index_ = index;i<ndim;i++){
-                    size_t reduce_imshape = imshape[ndim - i - 1] - (kernel_shape[ndim - i - 1] >> 1) - 1;
-                    grid_min[ndim - 1 - i] = index_ % reduce_imshape;
-                    index_ /= reduce_imshape;
-                }
-
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    col[col_offset] =  im[im_offset];
-                    grid_index.next();
-                    grid_offset++;
-                    col_offset++;
-
-                }while(!grid_index.is_zero());
-
-            }
-        }
-
-        template<typename T>
-        __global__ void im2col_gpu_nopadding_2d(T * col , const T * im , 
-            const size_t kernel_size ,
-            const size_t * kernel_shape ,  const size_t * imshape , 
-            const size_t imsize , const size_t reduce_imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < reduce_imsize){
-                size_t grid_min[2]; // index in image
-                size_t reduce_imshape = imshape[1] - (kernel_shape[1] >> 1) - 1;
-                grid_min[1] = index % reduce_imshape;
-                grid_min[0] = index / reduce_imshape;
-
-
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t kernel_index[2];
-                size_t grid_index[2];
-                for(grid_index[0] = 0;grid_index[0] < kernel_shape[0] ; grid_index[0] ++ ){
-                    for(grid_index[1] = 0;grid_index[1] < kernel_shape[1]; grid_index[1] ++){
-                        kernel_index[0] = grid_min[0] + grid_index[0];
-                        kernel_index[1] = grid_min[1] + grid_index[1];
-                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                        col[col_offset] =  im[im_offset];
-                        grid_offset++;
-                        col_offset++;
-                    } 
-                }
-
-            }
-        }
-        template<typename T>
-        __global__ void im2col_gpu(T * col , const T * im , const size_t kernel_size , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape , const size_t imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < imsize){
-                size_t imidx[kCudaMultiDimMax];
-                for(int i = 0 , index_ = index;i<ndim;i++){
-                    imidx[i] = index_ % imshape[ndim - i - 1];
-                    index_ /= imshape[ndim - i - 1];
-                }
-                size_t grid_min[kCudaMultiDimMax];
-                for(int i = 0;i<ndim;i++){
-                    grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
-                }
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    bool is_valid = true;
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                        if( kernel_index[i] >= imshape[i]){
-                            is_valid = false;
-                            break;
-                        }
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    col[col_offset] =  is_valid ? im[im_offset] : 0;
-                    grid_index.next();
-                    grid_offset++;
-                    col_offset++;
-
-                }while(!grid_index.is_zero());
-
-            }
-        }
-
-        template<typename T>
-        __global__ void im2col_gpu_2d(T * col , const T * im  , const size_t kernel_size 
-            , const size_t * kernel_shape ,  const size_t * imshape 
-            , const size_t imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < imsize){
-                size_t imidx[2];
-                imidx[0] = index % imshape[1];
-                imidx[1] = index / imshape[1];
-                size_t grid_min[2];
-                grid_min[0] = imidx[1] - (kernel_shape[0] >> 1);
-                grid_min[1] = imidx[0] - (kernel_shape[1] >> 1);
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t grid_index0 , grid_index1;
-                for(grid_index0 = 0;grid_index0 < kernel_shape[0];grid_index0++){
-                    for(grid_index1 = 0;grid_index1 < kernel_shape[1];grid_index1++)
-                    {
-                        bool is_valid = true;
-                        size_t kernel_index[2];
-                        kernel_index[0] = grid_min[0] + grid_index0;
-                        kernel_index[1] = grid_min[1] + grid_index1;
-                        is_valid = kernel_index[0] < imshape[0] && kernel_index[1] < imshape[1];
-                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                        col[col_offset] =  is_valid ? im[im_offset] : 0;
-                        grid_offset++;
-                        col_offset++;
-                    }
-                }
-
-            }
-        }
-        template<typename T>
-        __global__ void im2col_gpu_t(T * col , const T * im , const size_t kernel_size , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape , const size_t imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < imsize){
-                size_t imidx[kCudaMultiDimMax];
-                for(int i = 0 , index_ = index;i<ndim;i++){
-                    imidx[i] = index_ % imshape[ndim - i - 1];
-                    index_ /= imshape[ndim - i - 1];
-                }
-                size_t grid_min[kCudaMultiDimMax];
-                for(int i = 0;i<ndim;i++){
-                    grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
-                }
-                size_t grid_offset =  0;
-                size_t col_offset = index;
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    bool is_valid = true;
-                    size_t kernel_index[kCudaMultiDimMax];
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                        if( kernel_index[i] >= imshape[i]){
-                            is_valid = false;
-                            break;
-                        }
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    col[col_offset] =  is_valid ? im[im_offset] : 0;
-                    grid_index.next();
-                    grid_offset++;
-                    col_offset+=imsize;
-
-                }while(!grid_index.is_zero());
-
-            }
-        }
-
-        template<typename T>
-        __global__ void im2col_gpu_2d_t(T * col , const T * im  , const size_t kernel_size 
-            , const size_t * kernel_shape ,  const size_t * imshape 
-            , const size_t imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < imsize){
-                size_t imidx[2];
-                imidx[0] = index % imshape[1];
-                imidx[1] = index / imshape[1];
-                size_t grid_min[2];
-                grid_min[0] = imidx[1] - (kernel_shape[0] >> 1);
-                grid_min[1] = imidx[0] - (kernel_shape[1] >> 1);
-                size_t grid_offset =  0;
-                size_t col_offset = index;
-                size_t grid_index[2];
-                for(grid_index[0] = 0;grid_index[0] < kernel_shape[0];grid_index[0]++){
-                    for(grid_index[1] = 0;grid_index[1] < kernel_shape[1];grid_index[1]++)
-                    {
-                        bool is_valid = true;
-                        size_t kernel_index[2];
-                        kernel_index[0] = grid_min[0] + grid_index[0]; 
-                        kernel_index[1] = grid_min[1] + grid_index[1];
-                        is_valid = kernel_index[0] < imshape[0] && kernel_index[1] < imshape[1];
-                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                        col[col_offset] =  is_valid ? im[im_offset] : 0;
-                        grid_offset++;
-                        col_offset+= imsize;
-                    }
-                }
-
-            }
-        }
-
-
-        template <typename T>
-        void im2col_ptr(T * output , const T * input , const std::vector<size_t> & inputshape  , const std::vector<size_t> & kernel_shape , 
-            const std::vector<size_t> & inputstride , const std::vector<size_t> & outputstride , const Device device){
-            if(kernel_shape.size()!= inputshape.size())
-                throw std::runtime_error("im2col: kernel_shape size must be input shape size ");
-            auto half_kernel_shape = kernel_shape;
-            auto instride = inputstride;
-            auto revinstride = instride;
-            auto kernel_size = prod_vec(kernel_shape);
-            size_t inputsize = prod_vec(inputshape);
-            std::reverse(revinstride.begin() , revinstride.end());
-            for(int i = 0;i<half_kernel_shape.size();i++){
-                half_kernel_shape[i] /= 2;
-            }
-            std::vector<size_t> kernel_stride = {};
-            size_t kernel_stride_ = 1;
-            for(int i = 0;i<kernel_shape.size();i++){
-                kernel_stride.push_back(kernel_stride_);
-                kernel_stride_ *= kernel_shape[kernel_shape.size() - 1 - i];
-            }
-            if(device == Device::Cpu){
-                MultiDimIndex index(inputshape);
-                do{
-                    auto grid_min = index.get_index();
-                    for(int i = 0;i< grid_min.size();i++){
-                        grid_min[i] -= half_kernel_shape[i];
-                    }
-                    MultiDimIndex grid_index(kernel_shape);
-                    do{
-                        bool is_valid = true;
-                        std::vector<size_t> kernel_index(grid_index.get_index());
-                        for(int i = 0;i<kernel_index.size();i++){
-                            kernel_index[i] += grid_min[i];
-                            if( kernel_index[i] >= inputshape[i]){
-                                is_valid = false;
-                                break;
-                            }
-                        }
-                        if(is_valid){
-                            size_t input_index = dot_vec(kernel_index , revinstride);
-                            size_t result_index = index.calculate_offset(instride) * kernel_size + grid_index.calculate_offset(kernel_stride);
-                            output[result_index] = input[input_index];
-                        }
-                        grid_index.next();
-                    }while(!grid_index.is_zero());
-                    index.next();
-                }while(!index.is_zero());
-            }
-            else{
-                cuda_shared_pointer<size_t> kershape(kernel_shape , Cuda);
-                cuda_shared_pointer<size_t> imshape(inputshape ,Cuda);
-                im2col_gpu<<<CudaGetBlocks(inputsize) , kCudaThreadsNum>>>(output , input , prod_vec(kernel_shape) , inputshape.size()
-                ,kershape.get() , imshape.get() ,prod_vec(inputshape));
-            }
-        }
-        template <typename T>
-        void col2im_ptr( T * input ,const T * output, const std::vector<size_t> & inputshape  , const std::vector<size_t> & kernel_shape , 
-            const std::vector<size_t> & inputstride , const std::vector<size_t> & outputstride , const Device device){
-            if(kernel_shape.size()!= inputshape.size())
-                throw std::runtime_error("im2col: kernel_shape size must be input shape size ");
-            auto half_kernel_shape = kernel_shape;
-            auto instride = inputstride;
-            auto revinstride = instride;
-            auto kernel_size = prod_vec(kernel_shape);
-            size_t inputsize = prod_vec(inputshape);
-            std::reverse(revinstride.begin() , revinstride.end());
-            for(int i = 0;i<half_kernel_shape.size();i++){
-                half_kernel_shape[i] /= 2;
-            }
-            std::vector<size_t> kernel_stride = {};
-            size_t kernel_stride_ = 1;
-            for(int i = 0;i<kernel_shape.size();i++){
-                kernel_stride.push_back(kernel_stride_);
-                kernel_stride_ *= kernel_shape[kernel_shape.size() - 1 - i];
-            }
-            if(device == Device::Cpu){
-                MultiDimIndex index(inputshape);
-                do{
-                    auto grid_min = index.get_index();
-                    for(int i = 0;i< grid_min.size();i++){
-                        grid_min[i] -= half_kernel_shape[i];
-                    }
-                    MultiDimIndex grid_index(kernel_shape);
-                    do{
-                        bool is_valid = true;
-                        std::vector<size_t> kernel_index(grid_index.get_index());
-                        for(int i = 0;i<kernel_index.size();i++){
-                            kernel_index[i] += grid_min[i];
-                            if( kernel_index[i] >= inputshape[i]){
-                                is_valid = false;
-                                break;
-                            }
-                        }
-                        if(is_valid){
-                            size_t input_index = dot_vec(kernel_index , revinstride);
-                            size_t result_index = index.calculate_offset(instride) * kernel_size + grid_index.calculate_offset(kernel_stride);
-                            input[input_index] += output[result_index];
-                        }
-                        grid_index.next();
-                    }while(!grid_index.is_zero());
-                    index.next();
-                }while(!index.is_zero());
-            }
-            else{
-                cuda_shared_pointer<size_t> kershape(kernel_shape , Cuda);
-                cuda_shared_pointer<size_t> imshape(inputshape ,Cuda);
-                col2im_gpu<<<CudaGetBlocks(inputsize) , kCudaThreadsNum>>>(input , output , prod_vec(kernel_shape) , inputshape.size()
-                ,kershape.get() , imshape.get() ,prod_vec(inputshape));
-            }
-        }
-
-
-        template<typename T>
-        __global__ void col2im_gpu(T * im , const T * col  , const size_t kernel_size 
-            , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape 
-            , const size_t imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < imsize){
-                size_t imidx[kCudaMultiDimMax];
-                for(int i = 0 , index_ = index;i<ndim;i++){
-                    imidx[i] = index_ % imshape[ndim - i - 1];
-                    index_ /= imshape[ndim - i - 1];
-                }
-                size_t grid_min[kCudaMultiDimMax];
-                for(int i = 0;i<ndim;i++){
-                    grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
-                }
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    bool is_valid = true;
-                    size_t kernel_index[kCudaMultiDimMax];
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                        if( kernel_index[i] >= imshape[i]){
-                            is_valid = false;
-                            break;
-                        }
-                    }
-                    if(is_valid){
-                        size_t im_offset = 0;
-                        for(int i = 0;i<ndim;i++){
-                            im_offset *= imshape[i];
-                            im_offset += kernel_index[i];
-                        }
-                        atomicAdd( &im[im_offset] , col[col_offset] );
-                    }
-                    grid_index.next();
-                    grid_offset++;
-                    col_offset++;
-
-                }while(!grid_index.is_zero());
-
-            }
-        }
-
-        template<typename T>
-        __global__ void col2im_gpu_2d(T * im , const T * col  , const size_t kernel_size 
-            , const size_t * kernel_shape ,  const size_t * imshape 
-            , const size_t imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < imsize){
-                size_t imidx[2];
-                imidx[0] = index % imshape[1];
-                imidx[1] = index / imshape[1];
-                size_t grid_min[2];
-                grid_min[0] = imidx[1] - (kernel_shape[0] >> 1);
-                grid_min[1] = imidx[0] - (kernel_shape[1] >> 1);
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t grid_index[2];
-                for(grid_index[0] = 0;grid_index[0] < kernel_shape[0];grid_index[0]++){
-                    for(grid_index[1] = 0;grid_index[1] < kernel_shape[1];grid_index[1]++)
-                    {
-                        size_t kernel_index[2];
-                        bool is_valid = true;
-                        kernel_index[0] = grid_min[0] + grid_index[0]; 
-                        kernel_index[1] = grid_min[1] + grid_index[1];
-                        if( kernel_index[0] >= imshape[0] || kernel_index[1] >= imshape[1]){
-                            is_valid = false;
-                        }
-                        if(is_valid){
-                            size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                            atomicAdd( &im[im_offset] , col[col_offset] );
-                        }
-                        grid_offset++;
-                        col_offset++;
-                    }
-                }
-
-            }
-        }
-
-
-        template<typename T>
-        __global__ void col2im_gpu_nopadding(T * im , const T * col , 
-            const size_t kernel_size , const size_t ndim , 
-            const size_t * kernel_shape ,  const size_t * imshape , 
-            const size_t imsize , const size_t reduce_imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < reduce_imsize){
-                size_t grid_min[kCudaMultiDimMax]; // index in image
-                for(size_t i = 0 , index_ = index;i<ndim;i++){
-                    size_t reduce_imshape = imshape[ndim - i - 1] - (kernel_shape[ndim - i - 1] >> 1) - 1;
-                    grid_min[ndim - 1 - i] = index_ % reduce_imshape;
-                    index_ /= reduce_imshape;
-                }
-
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    atomicAdd( &im[im_offset] , col[col_offset] );
-                    grid_index.next();
-                    grid_offset++;
-                    col_offset++;
-
-                }while(!grid_index.is_zero());
-
-            }
-        }
-
-        template<typename T>
-        __global__ void col2im_gpu_nopadding_2d(T * im , const T * col , 
-            const size_t kernel_size ,
-            const size_t * kernel_shape ,  const size_t * imshape , 
-            const size_t imsize , const size_t reduce_imsize){
-            size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-            if(index < reduce_imsize){
-                size_t grid_min[2]; // index in image
-                size_t reduce_imshape = imshape[1] - (kernel_shape[1] >> 1) - 1;
-                grid_min[1] = index % reduce_imshape;
-                grid_min[0] = index / reduce_imshape;
-
-
-                size_t grid_offset =  0;
-                size_t col_offset = index * kernel_size;
-                size_t kernel_index[2];
-                size_t grid_index[2];
-                for(grid_index[0] = 0;grid_index[0] < kernel_shape[0] ; grid_index[0] ++ ){
-                    for(grid_index[1] = 0;grid_index[1] < kernel_shape[1]; grid_index[1] ++){
-                        kernel_index[0] = grid_min[0] + grid_index[0];
-                        kernel_index[1] = grid_min[1] + grid_index[1];
-                        size_t im_offset = kernel_index[0] * imshape[1] + kernel_index[1];
-                        atomicAdd( &im[im_offset] , col[col_offset] );
-                        grid_offset++;
-                        col_offset++;
-                    } 
-                }
-
-            }
-        }
-
-
 
 
     }
@@ -2324,1082 +1782,848 @@ namespace nn{
     };
 
     template <typename T>
-    class Conv : public Module<T>{
+    __global__ void _conv_bias_init(T * result , const T * bias , const size_t size , const size_t stride , const size_t out_channel){
+        int index = blockIdx.x * blockDim.x + threadIdx.x;
+        if(index < size){
+            size_t cid = (index / stride) % out_channel;
+            result[index] = bias[cid];
+        }
+    }
+    // kernels specific for 2d conv im2col and col2im
+
+    template<typename T , bool trans =false>
+    __global__ void im2col_gpu_2d(T * col , const T * im  , const size_t kernel_size 
+        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
+        , const size_t imsize);
+    template<typename T , bool trans = false>
+    __global__ void im2col_gpu_nopadding_2d(T * col , const T * im , 
+        const size_t kernel_size ,
+        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
+        , const size_t imsize);
+    template<typename T>
+    __global__ void col2im_gpu_2d(T * im , const T * col  , const size_t kernel_size 
+        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
+        , const size_t imsize);
+    template<typename T>
+    __global__ void col2im_gpu_nopadding_2d(T * im , const T * col , 
+        const size_t kernel_size ,
+        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
+        , const size_t imsize);
+
+    // kernels for n dim conv im2col and col2im
+
+    template<typename T , bool trans = false>
+    __global__ void im2col_gpu(T * col , const T * im , const size_t kernel_size , 
+        const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape ,const size_t hw, const size_t imsize);
+    template<typename T , bool trans = false>
+    __global__ void im2col_gpu_nopadding(T * col , const T * im , 
+        const size_t kernel_size , const size_t ndim , 
+        const size_t * kernel_shape ,  const size_t * imshape , const size_t rhw, const size_t hw,
+        const size_t imsize);
+    template<typename T>
+    __global__ void col2im_gpu(T * im , const T * col  , const size_t kernel_size 
+        , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape , const size_t hw
+        , const size_t imsize);
+    template<typename T>
+    __global__ void col2im_gpu_nopadding(T * im , const T * col , 
+        const size_t kernel_size , const size_t ndim , 
+        const size_t * kernel_shape ,  const size_t * imshape , const size_t rhw, const size_t hw,
+        const size_t imsize);
+
+    template <typename T>
+    __global__ void _conv_bias_backward(
+        T * grad_bias,
+        const T * grad_out , const size_t hw , const size_t c , const size_t size){
+        extern __shared__ char smem[];
+        T * bn_smem = reinterpret_cast<T *>(smem);
+        int tid = threadIdx.x;
+        int cid = blockIdx.x;
+        int warpId = tid / 32;
+        int laneId = tid % 32;
+        constexpr int warpsPerBlock =   kCudaThreadsNum / 32;
+        T sum = 0;
+        int chw = c * hw;
+        for(int offset = cid * hw;offset < size; offset += chw){
+            for(int i = tid;i < hw;i += kCudaThreadsNum){
+                sum += grad_out[i + offset];
+            }
+        }
+        sum = warpReduceSum<T>(sum);
+        __syncthreads();
+        if(laneId == 0) bn_smem[warpId] = sum;
+        __syncthreads();
+        if(tid == 0){
+            T val = bn_smem[0];
+            for(int i = 1;i < warpsPerBlock;i++){
+                val += bn_smem[i];
+            }
+            grad_bias[cid] = val;
+        }
+    }
+
+    template <typename T>
+    class Conv2d : public Module<T>{
         private:
-            Tensor<T> kernel_;
+            Tensor<T> kernel;
             Tensor<T> input_cache;
             PaddingMode padding_mode;
-            std::vector<size_t> single_kernel_shape;
-            std::vector<size_t> kernelstride;
-            size_t single_kernel_size;
-            std::vector<size_t> half_kernel_shape;
-            T * im2col_buf[2];
-            size_t im2col_size_prev;
+            Tensor<T> bias;
+            Device device;
+            size_t kernel_size;
+            T * buf;
+            size_t buf_size;
             cublasHandle_t handle;
-            cudaStream_t stream_im2col, stream_gemm;
-            cudaEvent_t ev[2];
         public:
-            ~Conv(){
-                if(im2col_buf[0] != nullptr){
-                    CHECK(cudaFree(im2col_buf[0]));
-                    CHECK(cudaFree(im2col_buf[1]));
-                }
-                CHECK(cudaStreamSynchronize(stream_gemm));
-                CHECK(cudaStreamSynchronize(stream_im2col));
-                CHECK(cudaStreamDestroy(stream_gemm));
-                CHECK(cudaStreamDestroy(stream_im2col));
-                cublasDestroy(handle);
+            Conv2d(const size_t in_channels , const size_t out_channels ,
+                 const size_t kernel_size , PaddingMode padding_mode = nn::NoPadding , Device device = DefaultDevice) : 
+                 padding_mode(padding_mode) , device(device) , kernel_size(kernel_size){
+                kernel = randn<float>({out_channels , in_channels , kernel_size , kernel_size} , device) * rsqrt( in_channels * kernel_size * kernel_size / T(2.0));
+                bias = randn<float>({out_channels} , device);
+                buf = 0;
+                buf_size = 0;
+                CHECK_CUBLAS(
+                    cublasCreate(&handle)
+                );
             }
-
-            Conv(const Tensor<T> & kernel , PaddingMode padding_mode = ZeroPadding)
-            : kernel_(kernel) , padding_mode(padding_mode) {
-                im2col_buf[0] = nullptr;
-                im2col_buf[1] = nullptr;
-                im2col_size_prev = 0;
-                cublasCreate(&handle);
-                cudaStreamCreate(&stream_im2col);
-                cudaStreamCreate(&stream_gemm);
-                cudaEventCreate(&ev[0]);
-                cudaEventCreate(&ev[1]);
-                cublasSetStream(handle , stream_gemm);
-                kernelstride = kernel_.get_strides();
-                single_kernel_shape = std::vector<size_t>(kernel_.shape().begin()+2 , kernel_.shape().end());
-                single_kernel_size = Functional::prod_vec(single_kernel_shape);
-                half_kernel_shape = single_kernel_shape;
-                for(int i = 0;i<half_kernel_shape.size();i++){
-                    half_kernel_shape[i] /= 2;
+            ~Conv2d(){
+                if(buf){
+                    if(device == Cuda){
+                        CHECK(cudaFree(buf));
+                    }
+                    else{
+                        delete [] buf;
+                    }
                 }
-            }
-            Conv(const std::vector<size_t> & kernel_shape,
-                PaddingMode padding_mode = ZeroPadding , Device device = DefaultDevice) : padding_mode(padding_mode) {
-                im2col_buf[0] = nullptr;
-                im2col_buf[1] = nullptr;
-                im2col_size_prev = 0;
-                cublasCreate(&handle);
-                cudaStreamCreate(&stream_im2col);
-                cudaStreamCreate(&stream_gemm);
-                cudaEventCreate(&ev[0]);
-                cudaEventCreate(&ev[1]);
-                cublasSetStream(handle , stream_gemm);
-                single_kernel_shape = std::vector<size_t>(kernel_shape.begin()+2 , kernel_shape.end());
-                single_kernel_size = Functional::prod_vec(single_kernel_shape);
-                kernel_ = randn<T>(kernel_shape , device) * rsqrt(single_kernel_size / (T)2);
-                kernelstride = kernel_.get_strides();
-                half_kernel_shape = single_kernel_shape;
-                for(int i = 0;i<half_kernel_shape.size();i++){
-                    half_kernel_shape[i] /= 2;
-                }
+                CHECK_CUBLAS(
+                    cublasDestroy(handle)
+                );
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                 auto input = inputs[0];
-                // input :(N , C_in , ...) kernel (C_out , C_in , ...) result (N , C_out , ...)
-                if(input.ndim() != kernel_.ndim()){
-                    std::cerr << "Conv: input and kernel must have the same number of dimensions" << std::endl;
-                    throw std::runtime_error("Conv: input and kernel must have the same number of dimensions");
+                if(input.ndim() != kernel.ndim()){
+                    std::cerr << "Conv2d: input and kernel must have the same number of dimensions" << std::endl;
+                    throw std::runtime_error("Conv2d: input and kernel must have the same number of dimensions");
                 }
-                if(input.shape()[1] != kernel_.shape()[1]){
-                    std::cerr << "Conv: input and kernel shape mismatch" << std::endl;
-                    throw std::runtime_error("Conv: input and kernel must have the same number of input channels");
+                if(input.shape()[1] != kernel.shape()[1]){
+                    std::cerr << "Conv2d: input and kernel must have the same number of input channels" << std::endl;
+                    throw std::runtime_error("Conv2d: input and kernel must have the same number of input channels");
+                }
+                if(input.device() != device){
+                    std::cerr << "Conv2d: input and kernel must be on the same device" << std::endl;
+                    throw std::runtime_error("Conv2d: input and kernel must be on the same device");
                 }
                 if(input.requires_grad()){
                     input_cache = input;
                 }
-                kernel_.to(input.device());
-                auto resultshape = input.shape();
-                resultshape[1] = kernel_.shape()[0];
+                const size_t n = input.shape()[0];
+                const size_t in_channel = input.shape()[1];
+                const size_t h = input.shape()[2];
+                const size_t w = input.shape()[3];
+                const size_t hw = h * w;
+                const size_t out_channel = kernel.shape()[0];
+                const size_t imsize = hw * in_channel;
+                const size_t ckernelsize = kernel_size * kernel_size * in_channel;
+                size_t ndim = 4;
+                
+                T alpha1 = 1.0 , beta1 = 1.0;
 
                 if(padding_mode == NoPadding){
-                    for(size_t i = 2;i<resultshape.size();i++){
-                        resultshape[i] -= (kernel_.shape()[i] - (kernel_.shape()[i] & 1));
+                    Tensor<T> result({n , out_channel , h - kernel_size + 1 , w - kernel_size + 1} , false , device);
+                    auto result_strides = result.get_strides();
+                    auto input_strides = input.get_strides();
+                    size_t resultbatchstep = result_strides.back() , inputbatchstep = imsize ;
+                    size_t resultcoutstep = result_strides[ndim - 2];
+                    if(device == Cuda){
+                        if(buf_size < resultcoutstep * ckernelsize * sizeof(T)){
+                            if(buf){
+                                CHECK(cudaFree(buf));
+                            }
+                            buf_size = resultcoutstep * ckernelsize * sizeof(T);
+                            CHECK(cudaMalloc(&buf , resultcoutstep * ckernelsize * sizeof(T) ));
+                        }
+                        _conv_bias_init<T><<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(
+                            result.get() , bias.get() , result.size() , result_strides[ndim - 2] , out_channel
+                        );
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0
+                            ; resultbatchoffset < result.size()
+                            ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            
+
+                            im2col_gpu_nopadding_2d<T , false><<<CudaGetBlocks(result_strides[ndim - 2]) , kCudaThreadsNum>>>(
+                                buf , 
+                                input.get() + inputbatchoffset,
+                                ckernelsize,
+                                kernel_size,
+                                kernel_size,
+                                h , 
+                                w,
+                                result_strides[ndim - 2],
+                                imsize
+                            );
+
+                            CHECK_CUBLAS(
+                                cublasSgemmStridedBatched(
+                                    handle,
+                                    CUBLAS_OP_N,
+                                    CUBLAS_OP_N,
+                                    1 , 
+                                    result_strides[ndim - 2],
+                                    ckernelsize,
+                                    &alpha1,
+                                    kernel.get(),
+                                    1,
+                                    ckernelsize,
+                                    buf,
+                                    ckernelsize,
+                                    0,
+                                    &beta1,
+                                    result.get() + resultbatchoffset,
+                                    1,
+                                    resultcoutstep,
+                                    out_channel
+                                )
+                            );
+                        }
                     }
-                }
+                    else{
+                        if(buf_size < resultcoutstep * ckernelsize * sizeof(T)){
+                            if(buf){
+                                delete [] buf;
+                            }
+                            buf_size = resultcoutstep * ckernelsize * sizeof(T);
+                            buf = new T[buf_size];
+                        }
+                        for(int i = 0;i < result.size();i++){
+                            result.get()[i] = bias.get()[(i / result_strides[ndim - 2]) % out_channel];
+                        }
+                        std::vector<size_t> single_shape(result.shape().begin() + 2 , result.shape().end());
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0
+                            ; resultbatchoffset < result.size()
+                            ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
 
-                Tensor<T> result(resultshape , input.device());
+                            
+                            
+                            MultiDimIndex index(single_shape);
+                            do{
+                                size_t m0 , m1; // index in image
+                                auto & index_ = index.get_index();
+                                m1 = index_[1];
+                                m0 = index_[0];
 
-                std::vector<size_t> resultstride = result.get_strides();
-                auto inputstride = input.get_strides();
-                std::vector<size_t> single_input_shape(input.shape().begin()+2 , input.shape().end());
-                std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
-                if(result.device() == Cuda){
-                    //ready for pipeline
 
-
-                    size_t single_input_size = Functional::prod_vec(single_input_shape);
-                    size_t im2col_size = single_input_size * single_kernel_size * sizeof(T);
-                    if(im2col_buf[0] == nullptr){
-                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
-                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
-                        im2col_size_prev = im2col_size;
-                    }
-                    else if(im2col_size_prev != im2col_size){
-                        CHECK(cudaFree(im2col_buf[0]));
-                        CHECK(cudaFree(im2col_buf[1]));
-                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
-                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
-                        im2col_size_prev = im2col_size;
-                    }
-
-                    T alpha = 1.0f;
-                    T beta = 1.0f;
-
-                    size_t iter = 0;
-
-                    //preprocessing
-                    auto instride = single_input_stride;
-                    auto revinstride = instride;
-                    std::reverse(revinstride.begin() , revinstride.end());
-                    cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
-                    cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
-                    size_t inputbatchoffset , resultbatchoffset , resultoutoffset , kerneloutoffset , inputinoffset , kernelinoffset;
-                    size_t prev_kerneloutoffset , prev_kernelinoffset , prev_resultoutoffset , prev_resultbatchoffset;
-                    if(padding_mode == ZeroPadding){
-
-                        if(single_kernel_shape.size() == 2){
-                            for(inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                                for(resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                    for(inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        Functional::im2col_gpu_2d<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size
-                                        ,kershape.get() , imshape.get() ,single_input_size);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    single_input_size,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    single_input_size,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
-                                        }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_resultoutoffset = resultoutoffset;
-                                        prev_resultbatchoffset = resultbatchoffset;
+                                size_t grid_offset =  0;
+                                size_t col_offset;
+                                col_offset = (m1 + m0 * result_strides[1]) * kernel_size;
+                                for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
+                                    for(size_t g0 = 0;g0 < kernel_size ; g0 ++ ){
+                                        for(size_t g1 = 0;g1 < kernel_size; g1 ++){
+                                            size_t ix = m0 + g0;
+                                            size_t iy = m1 + g1;
+                                            size_t im_offset = ix * w + iy;
+                                            buf[col_offset] =  input.get()[im_offset + coffset + inputbatchoffset];
+                                            grid_offset++;
+                                            col_offset++;
+                                        } 
                                     }
                                 }
-                            }
 
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    single_input_size,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    single_input_size,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
+                                index.next();
+                            }while(!index.is_zero());
+
+                            for(size_t kernelcoutoffset = 0 , resultcoutoffset = 0;
+                            kernelcoutoffset < kernel.size();
+                            kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                for(size_t i = 0; i < result_strides[ndim - 2];i++){
+                                    T sum = 0;
+                                    for(size_t k = 0;k < ckernelsize;k++){
+                                        sum += buf[i * ckernelsize + k] * kernel.get()[kernelcoutoffset + k];
+                                    }
+                                    result.get()[resultbatchoffset + i] += sum;
+                                }
                             }
                         }
-                        else{
 
-                            for(inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                                for(resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                    for(inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
+                    }
+                    if (input.requires_grad()){
+                        result.set_requires_grad(true);
+                        result.set_grad_fn(
+                            std::make_shared<Functional::ModuleFunctionWrapper<T>>(this , input)
+                        );
+                    }
+                    return result;
+                }
+                else{
+                    Tensor<T> result({n , out_channel , h , w} , 0 , device);
+                    auto result_strides = result.get_strides();
+                    auto input_strides = input.get_strides();
+                    size_t resultbatchstep = result_strides.back() , inputbatchstep = imsize ;
+                    size_t resultcoutstep = result_strides[ndim - 2];
 
-                                        Functional::im2col_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size , single_input_shape.size()
-                                        ,kershape.get() , imshape.get() ,single_input_size);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    single_input_size,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-
-                                            }
-                                            else if constexpr (std::is_same_v<T ,double>){
-                                                CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    single_input_size,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
-                                        }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_resultoutoffset = resultoutoffset;
-                                        prev_resultbatchoffset = resultbatchoffset;
-                                    }
-                                }
+                    if(device == Cuda){
+                        if(buf_size < resultcoutstep * ckernelsize * sizeof(T)){
+                            if(buf){
+                                CHECK(cudaFree(buf));
                             }
+                            buf_size = resultcoutstep * ckernelsize * sizeof(T);
+                            CHECK(cudaMalloc(&buf , resultcoutstep * ckernelsize * sizeof(T)));
+                        }
+                        _conv_bias_init<T><<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(
+                            result.get(),bias.get() , result.size(), resultcoutstep , out_channel
+                        );
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                            resultbatchoffset < result.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
 
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                            im2col_gpu_2d<<<CudaGetBlocks(result_strides[ndim - 2]) , kCudaThreadsNum>>>(
+                                buf,
+                                input.get() + inputbatchoffset,
+                                ckernelsize,
+                                kernel_size,
+                                kernel_size,
+                                h,
+                                w,
+                                imsize
+                            );
+
+                            CHECK_CUBLAS(
+                                cublasSgemmStridedBatched(
+                                    handle,
+                                    CUBLAS_OP_N,
+                                    CUBLAS_OP_N,
                                     1 , 
-                                    single_input_size,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                                result.print();
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    single_input_size,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                            }
-
+                                    result_strides[ndim - 2],
+                                    ckernelsize,
+                                    &alpha1,
+                                    kernel.get(),
+                                    1,
+                                    ckernelsize,
+                                    buf,
+                                    ckernelsize,
+                                    0,
+                                    &beta1,
+                                    result.get() + resultbatchoffset,
+                                    1,
+                                    resultcoutstep,
+                                    out_channel
+                                )
+                            );
                         }
                     }
                     else{
 
-                        size_t reduce_imsize = 1;
-
-                        for(size_t i = 2;i<resultshape.size();i++){
-                            reduce_imsize *= resultshape[i];
+                        if(buf_size < resultcoutstep * ckernelsize * sizeof(T)){
+                            if(buf){
+                                delete [] buf;
+                            }
+                            buf_size = resultcoutstep * ckernelsize * sizeof(T);
+                            buf = new T[resultcoutstep * ckernelsize];
                         }
-                        if(single_kernel_shape.size() == 2){
-                            for(inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                                for(resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                    for(inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
+                        for(int i = 0;i < result.size();i++){
+                            result.get()[i] = bias.get()[(i / result_strides[ndim - 2]) % out_channel];
+                        }
+                        std::vector<size_t> single_shape(result.shape().begin() + 2 , result.shape().end());
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0
+                            ; resultbatchoffset < result.size()
+                            ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
 
-                                        Functional::im2col_gpu_nopadding_2d<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size 
-                                        ,kershape.get() , imshape.get() ,single_input_size , reduce_imsize);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    reduce_imsize,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    reduce_imsize,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
+
+                            
+                            
+                            MultiDimIndex index(single_shape);
+                            do{
+
+
+                                auto & index_ = index.get_index();
+                                size_t m0 , m1;
+                                m0 = index_[0] - (kernel_size >> 1);
+                                m1 = index_[1] - (kernel_size >> 1);
+                                size_t grid_offset =  0;
+                                size_t col_offset;
+                                col_offset = (index_[0] * single_shape[1] + index_[1]) * kernel_size;
+                                size_t grid_index0 , grid_index1 , hw = h * w;
+                                for(size_t coffset = 0;coffset < imsize; coffset += hw){
+                                    for(grid_index0 = 0;grid_index0 < kernel_size;grid_index0++){
+                                        for(grid_index1 = 0;grid_index1 < kernel_size;grid_index1++)
+                                        {
+                                            bool is_valid = true;
+                                            size_t k0 = m0 + grid_index0;
+                                            size_t k1 = m1 + grid_index1;
+                                            is_valid =  k0 < h && k1 < w;
+                                            size_t im_offset = k0 * w + k1;
+                                            buf[col_offset] =  is_valid ? input.get()[im_offset + coffset + inputbatchoffset] : 0;
+                                            grid_offset++;
+                                            col_offset++;
                                         }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_resultoutoffset = resultoutoffset;
-                                        prev_resultbatchoffset = resultbatchoffset;
                                     }
                                 }
-                            }
+                                index.next();
+                            }while(!index.is_zero());
 
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            if constexpr (std::is_same_v<T , float>){
-
-                                CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    reduce_imsize,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-
-                                CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    reduce_imsize,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                            }
-
-                        }
-                        else{
-                            for(inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                                for(resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                    for(inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        Functional::im2col_gpu_nopadding<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size , single_input_shape.size()
-                                        ,kershape.get() , imshape.get() ,single_input_size , reduce_imsize);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    reduce_imsize,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                                    1 , 
-                                                    reduce_imsize,
-                                                    single_kernel_size, 
-                                                    &alpha , 
-                                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                                    1, 
-                                                    im2col_buf[prev] ,
-                                                    single_kernel_size , 
-                                                    &beta , 
-                                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                                    1
-                                                ));
-                                            }
-                                        }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_resultoutoffset = resultoutoffset;
-                                        prev_resultbatchoffset = resultbatchoffset;
+                            for(size_t kernelcoutoffset = 0 , resultcoutoffset = 0;
+                            kernelcoutoffset < kernel.size();
+                            kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                for(size_t i = 0; i < result_strides[ndim - 2];i++){
+                                    T sum = 0;
+                                    for(size_t k = 0;k < ckernelsize;k++){
+                                        sum += buf[i * ckernelsize + k] * kernel.get()[kernelcoutoffset + k ];
                                     }
+                                    result.get()[resultbatchoffset + i] += sum;
                                 }
                             }
-
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS( cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    reduce_imsize,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-                                CHECK_CUBLAS( cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N,
-                                    1 , 
-                                    reduce_imsize,
-                                    single_kernel_size, 
-                                    &alpha , 
-                                    kernel_.get() + prev_kerneloutoffset + prev_kernelinoffset  , 
-                                    1, 
-                                    im2col_buf[(iter + 1) & 1] ,
-                                    single_kernel_size , 
-                                    &beta , 
-                                    result.get() + prev_resultbatchoffset + prev_resultoutoffset , 
-                                    1
-                                ));
-                            }
-
                         }
                     }
+                    return result;
                 }
-                else{
-                    std::vector<size_t> single_output_stride(resultstride.begin() , resultstride.end() - 2);
-                    for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;inputbatchoffset < input.size()
-                        ;inputbatchoffset += inputstride[input.ndim() - 1] , resultbatchoffset += resultstride[result.ndim() - 1]){
-                            for(size_t resultoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                ;kerneloutoffset += kernelstride.back() , resultoutoffset += resultstride[result.ndim() - 2]){
-                                    for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                    ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                        Tensor<T> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                        Functional::im2col_ptr<T>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
-                                        ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
-                                        for(size_t i = 0;i< inputtlide.shape()[0];i++){
-                                            T sum = 0;
-                                            for(size_t k = 0;k<inputtlide.shape()[1];k++){
-                                                sum += inputtlide.get()[i * inputtlide.shape()[1] + k] * 
-                                                kernel_.get()[kerneloutoffset+kernelinoffset+ k];
-                                            }
-                                            result.get()[resultbatchoffset + resultoutoffset + i] += sum;
-                                        }
-                                    }
-                                }
-                    }
 
-                }
-                if(input.requires_grad()){
-                    result.set_requires_grad(true);
-                    result.set_grad_fn(
-                        std::make_shared<Functional::ModuleFunctionWrapper<T> >(this , input  ));
-                }
-                return result;
-                    
+
             }
+
+        
+        
             std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
-                // grad_out (N , C_out , ...) kernel (C_out , C_in , ...) input (N , C_in , ...)
                 auto input = input_cache;
-                // first calculating kernel 
-                auto inputstride = input.get_strides();
-                auto kernelstride = kernel_.get_strides();
-                std::vector<size_t> outstride = grad_out.get_strides();
-                std::vector<size_t> single_kernel_shape(kernel_.shape().begin()+2 , kernel_.shape().end());
-                std::vector<size_t> single_input_shape(input.shape().begin()+2 , input.shape().end());
-                std::vector<size_t> single_input_stride(inputstride.begin() , inputstride.end() - 2);
-                std::vector<size_t> single_output_stride(outstride.begin() , outstride.end() - 2);
-                Tensor<T>  grad_kernel(kernel_.shape() , kernel_.device());
-                Tensor<T>  grad_input(input.shape() , input.device());
-                if(grad_kernel.device() == Cuda){
+                const size_t n = input.shape()[0];
+                const size_t in_channel = input.shape()[1];
+                const size_t h = input.shape()[2];
+                const size_t w = input.shape()[3];
+                const size_t hw = h * w;
+                const size_t out_channel = kernel.shape()[0];
+                const size_t imsize = hw * in_channel;
+                const size_t ckernelsize = kernel_size * kernel_size * in_channel;
+                size_t ndim = 4;
+                
+                T alpha1 = 1.0 , beta1 = 1.0;
 
-                    auto single_kernel_size = Functional::prod_vec(single_kernel_shape);
-                    size_t single_input_size = Functional::prod_vec(single_input_shape);
-                    size_t im2col_size = single_input_size * single_kernel_size * sizeof(T);
 
-                    if(im2col_buf[0] == nullptr){
-                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
-                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
-                        im2col_size_prev = im2col_size;
+                if(padding_mode == NoPadding){
+                    Tensor<T> grad_kernel(kernel.shape() , device);
+                    auto outstrides = grad_out.get_strides();
+                    size_t resultcoutstep = outstrides[ndim - 2];
+                    size_t resultbatchstep = outstrides[ndim - 1] , inputbatchstep = imsize;
+                    if(device == Cuda){
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                                resultbatchoffset < grad_out.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            im2col_gpu_nopadding_2d<T , true><<<CudaGetBlocks(outstrides[ndim - 2]) , kCudaThreadsNum>>>(buf , input.get() + inputbatchoffset , 
+                                ckernelsize,
+                                kernel_size,
+                                kernel_size,
+                                h , 
+                                w,
+                                outstrides[ndim - 2],
+                                imsize
+                            );
+
+                            CHECK_CUBLAS(
+                                cublasSgemmStridedBatched(handle,
+                                    CUBLAS_OP_N,CUBLAS_OP_N,
+                                    1,
+                                    ckernelsize,
+                                    resultcoutstep,
+                                    &alpha1,
+                                    grad_out.get() + resultbatchoffset,
+                                    1,
+                                    resultcoutstep,
+                                    buf,
+                                    resultcoutstep,
+                                    0,
+                                    &beta1,
+                                    grad_kernel.get(),
+                                    1,
+                                    ckernelsize,
+                                    out_channel
+                                )
+                            );
+                        }
                     }
-                    else if(im2col_size_prev != im2col_size){
-                        CHECK(cudaFree(im2col_buf[0]));
-                        CHECK(cudaFree(im2col_buf[1]));
-                        CHECK(cudaMalloc(&im2col_buf[0] , im2col_size));
-                        CHECK(cudaMalloc(&im2col_buf[1] , im2col_size));
-                        im2col_size_prev = im2col_size;
-                    }
+                    else{
 
-                    T alpha = 1.0f;
-                    T beta = 1.0f;
-                    T beta0 = 0;
+                        std::vector<size_t> single_shape(grad_out.shape().begin() + 2 , grad_out.shape().end());
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0
+                            ; resultbatchoffset < grad_out.size()
+                            ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
 
-                    size_t iter = 0;
-
-                    //preprocessing
-                    auto instride = single_input_stride;
-                    auto revinstride = instride;
-                    std::reverse(revinstride.begin() , revinstride.end());
-                    for(int i = 0;i<half_kernel_shape.size();i++){
-                        half_kernel_shape[i] /= 2;
-                    }
-                    cuda_shared_pointer<size_t> kershape(single_kernel_shape , Cuda);
-                    cuda_shared_pointer<size_t> imshape(single_input_shape ,Cuda);
-                    size_t prev_gradoutoffset = 0 , prev_gradbatchoffset = 0 , prev_kerneloutoffset = 0 , prev_kernelinoffset = 0;
-
-                    if(padding_mode == ZeroPadding) {
-                        if(single_kernel_shape.size() == 2){
-                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
+                            
+                            
+                            MultiDimIndex index(single_shape);
+                            do{
+                                size_t m0 , m1; // index in image
+                                auto & index_ = index.get_index();
+                                m1 = index_[1];
+                                m0 = index_[0];
 
 
-                                        Functional::im2col_gpu_2d_t<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size 
-                                        ,kershape.get() , imshape.get() ,single_input_size);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , single_input_size
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , single_input_size
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                        }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_gradoutoffset = gradoutoffset;
-                                        prev_gradbatchoffset = gradbatchoffset;
+                                size_t grid_offset =  0;
+                                size_t col_offset;
+                                col_offset = m1 + m0 * single_shape[1];
+                                for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
+                                    for(size_t g0 = 0;g0 < kernel_size ; g0 ++ ){
+                                        for(size_t g1 = 0;g1 < kernel_size; g1 ++){
+                                            size_t ix = m0 + g0;
+                                            size_t iy = m1 + g1;
+                                            size_t im_offset = ix * w + iy;
+                                            buf[col_offset] = input.get()[im_offset + coffset + inputbatchoffset];
+                                            grid_offset++;
+                                            col_offset+= outstrides[ndim - 2];
+                                        } 
                                     }
                                 }
-                            }
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , single_input_size
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            else if constexpr (std::is_same_v<T ,double>){
-                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , single_input_size
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            kernel_.set_grad(grad_kernel);
-                            size_t prev_inputbatchoffset = 0 , prev_inputinoffset = 0;
-                            iter = 0;
 
-                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                                index.next();
+                            }while(!index.is_zero());
 
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        if constexpr (std::is_same_v<T , float>){
-                                            CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , single_input_size , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            ));
-                                        }
-                                        else if constexpr (std::is_same_v <T , double>){
-                                            CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , single_input_size , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            ));
-
-                                        }
-                                        CHECK(cudaEventRecord(ev[cur] , stream_gemm));
-
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_im2col , ev[prev] , 0);
-                                            Functional::col2im_gpu_2d<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                                            , im2col_buf[(iter + 1) & 1] , single_kernel_size 
-                                            ,kershape.get() , imshape.get() , single_input_size);
-                                        }
-
-                                        iter++;
-                                        prev_inputbatchoffset = inputbatchoffset;
-                                        prev_inputinoffset = inputinoffset;
+                            for(size_t kernelcoutoffset = 0 , resultcoutoffset = 0;
+                            kernelcoutoffset < kernel.size();
+                            kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                for(size_t i = 0; i < ckernelsize;i++){
+                                    T sum = 0;
+                                    for(size_t k = 0;k < outstrides[ndim  - 2];k++){
+                                        sum += buf[i * outstrides[ndim - 2] + k] * grad_out.get()[resultcoutoffset + k + resultbatchoffset];
                                     }
+                                    grad_kernel.get()[resultbatchoffset + i] += sum;
                                 }
                             }
+                        }
 
-                            cudaStreamWaitEvent(stream_im2col , ev[(iter + 1) & 1] , 0);
-                            Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                            , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
-                            ,kershape.get() , imshape.get() , single_input_size);
+
+                    }
+                    kernel.set_grad(grad_kernel);
+                    Tensor<T> grad_bias(bias.shape() , device);
+                    if(device == Cuda){
+                        _conv_bias_backward<<< out_channel , kCudaThreadsNum>>>(
+                            grad_bias.get(),
+                            grad_out.get(),
+                            outstrides[ndim - 2],
+                            out_channel,
+                            grad_out.size()
+                        );
+                    }
+                    else{
+                        for(int cid = 0; cid < out_channel;cid++){
+                            T sum_grad = 0;
+                            for(int offset = cid * hw;offset < grad_out.size(); offset += outstrides[ndim - 2]){
+                                for(int i = 0;i < outstrides[ndim - 2];i++){
+                                    sum_grad += grad_out[i + offset];
+                                }
+                            }
+                            grad_bias.get()[cid] = sum_grad;
 
                         }
-                        else{
-                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        Functional::im2col_gpu_t<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size , single_input_shape.size()
-                                        ,kershape.get() , imshape.get() ,single_input_size);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , single_input_size
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , single_input_size
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                        }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_gradoutoffset = gradoutoffset;
-                                        prev_gradbatchoffset = gradbatchoffset;
-                                    }
-                                }
-                            }
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , single_input_size
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , single_input_size
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , single_input_size  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-
-                            }
-                            kernel_.set_grad(grad_kernel);
-                            size_t prev_inputbatchoffset = 0 , prev_inputinoffset = 0;
-                            iter = 0;
-
-                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        if constexpr (std::is_same_v<T , float>){
-                                            CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , single_input_size , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            ));
-                                        }
-                                        else if constexpr (std::is_same_v<T , double>){
-                                            CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , single_input_size , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            ));
-                                        }
-                                        CHECK(cudaEventRecord(ev[cur] , stream_gemm));
-
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_im2col , ev[prev] , 0);
-                                            Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                                            , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
-                                            ,kershape.get() , imshape.get() , single_input_size);
-                                        }
-
-                                        iter++;
-                                        prev_inputbatchoffset = inputbatchoffset;
-                                        prev_inputinoffset = inputinoffset;
-                                    }
-                                }
+                    }
+                    bias.set_grad(grad_bias);
+                    Tensor<T> grad_in(input.shape() , device);
+                    if(device == Cuda){
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                            resultbatchoffset < grad_out.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            CHECK(cudaMemset(buf , 0 , buf_size));
+                            for(size_t kernelcoutoffset = 0, resultcoutoffset = 0;
+                                kernelcoutoffset < kernel.size();
+                                kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                
+                                CHECK_CUBLAS(
+                                cublasSgemm(handle,
+                                    CUBLAS_OP_T,
+                                    CUBLAS_OP_N,
+                                    ckernelsize,
+                                    outstrides[ndim - 2],
+                                    1,
+                                    &alpha1,
+                                    kernel.get() + kernelcoutoffset,
+                                    1,
+                                    grad_out.get() + resultbatchoffset + resultcoutoffset,
+                                    1,
+                                    &beta1,
+                                    buf,
+                                    ckernelsize
+                                ));
                             }
 
-                            cudaStreamWaitEvent(stream_im2col , ev[(iter + 1) & 1] , 0);
-                            Functional::col2im_gpu<<<CudaGetBlocks(single_input_size) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                            , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
-                            ,kershape.get() , imshape.get() , single_input_size);
+                            col2im_gpu_nopadding_2d<<<CudaGetBlocks(outstrides[ndim - 2]) , kCudaThreadsNum>>>(
+                                grad_in.get() + inputbatchoffset,
+                                buf,
+                                ckernelsize,
+                                kernel_size,
+                                kernel_size,
+                                h,
+                                w,
+                                outstrides[ndim - 2],
+                                imsize
+                            );
 
                         }
 
                     }
                     else{
-                        size_t reduce_imsize = 1;
+                        std::vector<size_t> single_shape(grad_out.shape().begin() + 2 , grad_out.shape().end());
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                            resultbatchoffset < grad_out.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            memset(buf , 0 , buf_size);
+                            for(size_t kernelcoutoffset = 0, resultcoutoffset = 0;
+                                kernelcoutoffset < kernel.size();
+                                kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                
+                                for(size_t i = 0; i < outstrides[ndim - 2];i++){
+                                    for(size_t k = 0;k < ckernelsize;k++){
+                                        buf[i * ckernelsize + k] += grad_out.get()[resultbatchoffset + resultcoutoffset + i] * kernel.get()[kernelcoutoffset + k];
+                                    }
+                                }
+                            }
+                            MultiDimIndex index(single_shape);
+                            do{
 
-                        for(size_t i = 2;i<grad_out.shape().size();i++){
-                            reduce_imsize *= grad_out.shape()[i];
+                                size_t m0 , m1; // index in image
+                                auto & index_ = index.get_index();
+                                m1 = index_[1];
+                                m0 = index_[0];
+
+                                size_t grid_offset =  0;
+                                size_t col_offset;
+                                col_offset = (index_[0] * single_shape[1] + index_[1]) * kernel_size;
+                                size_t hw = h * w;
+                                for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
+                                    for(size_t g0 = 0;g0 < kernel_size ; g0 ++ ){
+                                        for(size_t g1 = 0;g1 < kernel_size; g1 ++){
+                                            size_t ix = m0 + g0;
+                                            size_t iy = m1 + g1;
+                                            size_t im_offset = ix * w + iy;
+                                            grad_in.get()[im_offset + coffset + inputbatchoffset] += buf[col_offset];
+                                            grid_offset++;
+                                            col_offset++;
+                                        } 
+                                    }
+                                }
+
+                                index.next();
+                            }while(!index.is_zero());
                         }
-                        if(single_kernel_shape.size() == 2){
-                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
+                    }
 
-                                        Functional::im2col_gpu_nopadding_2d_t<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size 
-                                        ,kershape.get() , imshape.get() ,single_input_size , reduce_imsize);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , reduce_imsize
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , reduce_imsize
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
+                    return {grad_in};
+                }
+                else{// zero padding
+                    
+                    Tensor<T> grad_kernel(kernel.shape() , device);
+                    auto outstrides = grad_out.get_strides();
+                    size_t resultcoutstep = outstrides[ndim - 2];
+                    size_t resultbatchstep = outstrides[ndim - 1] , inputbatchstep = imsize;
+                    if(device == Cuda){
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                            resultbatchoffset < grad_out.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            
+                            im2col_gpu_2d<T , true><<<CudaGetBlocks(outstrides[ndim - 2]) , kCudaThreadsNum>>>(buf , input.get() + inputbatchoffset ,
+                                ckernelsize,
+                                kernel_size,
+                                kernel_size,
+                                h, 
+                                w , 
+                                imsize
+                            );
+
+                            CHECK_CUBLAS(
+                                cublasSgemmStridedBatched(handle,
+                                    CUBLAS_OP_N,CUBLAS_OP_N,
+                                    1,
+                                    ckernelsize,
+                                    resultcoutstep,
+                                    &alpha1,
+                                    grad_out.get() + resultbatchoffset,
+                                    1,
+                                    resultcoutstep,
+                                    buf,
+                                    resultcoutstep,
+                                    0,
+                                    &beta1,
+                                    grad_kernel.get(),
+                                    1,
+                                    ckernelsize,
+                                    out_channel
+                                )
+                            );
+                        }
+                    }
+                    else{
+
+                        std::vector<size_t> single_shape(grad_out.shape().begin() + 2 , grad_out.shape().end());
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0
+                            ; resultbatchoffset < grad_out.size()
+                            ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+
+                            
+                            
+                            MultiDimIndex index(single_shape);
+                            do{
+                                auto & index_ = index.get_index();
+                                size_t m0 , m1;
+                                m0 = index_[0] - (kernel_size >> 1);
+                                m1 = index_[1] - (kernel_size >> 1);
+                                size_t grid_offset =  0;
+                                size_t col_offset;
+                                col_offset = (index_[0] * single_shape[1] + index_[1]) * kernel_size;
+                                size_t grid_index0 , grid_index1 , hw = h * w;
+                                for(size_t coffset = 0;coffset < imsize; coffset += hw){
+                                    for(grid_index0 = 0;grid_index0 < kernel_size;grid_index0++){
+                                        for(grid_index1 = 0;grid_index1 < kernel_size;grid_index1++)
+                                        {
+                                            bool is_valid = true;
+                                            size_t k0 = m0 + grid_index0;
+                                            size_t k1 = m1 + grid_index1;
+                                            is_valid =  k0 < h && k1 < w;
+                                            size_t im_offset = k0 * w + k1;
+                                            buf[col_offset] =  is_valid ? input.get()[im_offset + coffset + inputbatchoffset] : 0;
+                                            grid_offset++;
+                                            col_offset++;
                                         }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_gradoutoffset = gradoutoffset;
-                                        prev_gradbatchoffset = gradbatchoffset;
                                     }
                                 }
-                            }
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , reduce_imsize
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , reduce_imsize
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            kernel_.set_grad(grad_kernel);
-                            size_t prev_inputbatchoffset = 0 , prev_inputinoffset = 0;
-                            iter = 0;
+                                index.next();
 
-                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
+                            }while(!index.is_zero());
 
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        if constexpr (std::is_same_v<T , float>){
-                                            CHECK_CUBLAS(
-                                            cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , reduce_imsize , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            ));
-                                        }
-                                        else if constexpr (std::is_same_v<T , double>){
-                                            CHECK_CUBLAS(
-                                            cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , reduce_imsize , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            ));
-                                        }
-                                        CHECK(cudaEventRecord(ev[cur] , stream_gemm));
-
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_im2col , ev[prev] , 0);
-                                            Functional::col2im_gpu_nopadding_2d<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                                            , im2col_buf[prev] , single_kernel_size 
-                                            ,kershape.get() , imshape.get() , single_input_size , reduce_imsize);
-                                        }
-
-                                        iter++;
-                                        prev_inputbatchoffset = inputbatchoffset;
-                                        prev_inputinoffset = inputinoffset;
+                            for(size_t kernelcoutoffset = 0 , resultcoutoffset = 0;
+                            kernelcoutoffset < kernel.size();
+                            kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                for(size_t i = 0; i < ckernelsize;i++){
+                                    T sum = 0;
+                                    for(size_t k = 0;k < outstrides[ndim  - 2];k++){
+                                        sum += buf[i * outstrides[ndim - 2] + k] * grad_out.get()[resultcoutoffset + k + resultbatchoffset];
                                     }
+                                    grad_kernel.get()[resultbatchoffset + i] += sum;
                                 }
                             }
+                        }
 
-                            cudaStreamWaitEvent(stream_im2col , ev[(iter + 1) & 1] , 0);
-                            Functional::col2im_gpu_nopadding_2d<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                            , im2col_buf[(iter + 1) & 1] , single_kernel_size 
-                            ,kershape.get() , imshape.get() , single_input_size , reduce_imsize);
+
+                    }
+                    kernel.set_grad(grad_kernel);
+                    Tensor<T> grad_bias(bias.shape() , device);
+                    if(device == Cuda){
+                        _conv_bias_backward<<< out_channel , kCudaThreadsNum>>>(
+                            grad_bias.get(),
+                            grad_out.get(),
+                            outstrides[ndim - 2],
+                            out_channel,
+                            grad_out.size()
+                        );
+                    }
+                    else{
+                        for(int cid = 0; cid < out_channel;cid++){
+                            T sum_grad = 0;
+                            for(int offset = cid * hw;offset < grad_out.size(); offset += outstrides[ndim - 2]){
+                                for(int i = 0;i < outstrides[ndim - 2];i++){
+                                    sum_grad += grad_out[i + offset];
+                                }
+                            }
+                            grad_bias.get()[cid] = sum_grad;
 
                         }
-                        else{
-                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        Functional::im2col_gpu_nopadding_t<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>
-                                        (im2col_buf[cur] , input.get() + inputbatchoffset + inputinoffset ,
-                                        single_kernel_size , single_input_shape.size()
-                                        ,kershape.get() , imshape.get() ,single_input_size , reduce_imsize);
-                                        CHECK(cudaEventRecord(ev[cur] , stream_im2col)) ;
-                                        
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_gemm , ev[prev] , 0);
-                                            if constexpr (std::is_same_v<T , float>){
-                                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , reduce_imsize
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                            else if constexpr (std::is_same_v<T , double>){
-                                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                                    , 1 , single_kernel_size , reduce_imsize
-                                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                                    im2col_buf[prev] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                                            }
-                                        }
-                                        iter++;
-                                        prev_kerneloutoffset = kerneloutoffset;
-                                        prev_kernelinoffset = kernelinoffset;
-                                        prev_gradoutoffset = gradoutoffset;
-                                        prev_gradbatchoffset = gradbatchoffset;
-                                    }
-                                }
-                            }
-                            cudaStreamWaitEvent(stream_gemm , ev[(iter + 1) & 1] , 0);
-                            if constexpr (std::is_same_v<T , float>){
-                                CHECK_CUBLAS(cublasSgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , reduce_imsize
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            else if constexpr (std::is_same_v<T , double>){
-                                CHECK_CUBLAS(cublasDgemm(handle , CUBLAS_OP_N , CUBLAS_OP_N
-                                    , 1 , single_kernel_size , reduce_imsize
-                                    , &alpha , grad_out.get() + prev_gradbatchoffset + prev_gradoutoffset, 1 , 
-                                    im2col_buf[(iter + 1) & 1] , reduce_imsize  , &beta , grad_kernel.get() + prev_kerneloutoffset + prev_kernelinoffset , 1));
-                            }
-                            kernel_.set_grad(grad_kernel);
-                            size_t prev_inputbatchoffset = 0 , prev_inputinoffset = 0;
-                            iter = 0;
-
-                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                                ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                                    ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-
-                                        size_t cur = iter & 1;
-                                        size_t prev = (iter + 1) & 1;
-
-                                        if constexpr (std::is_same_v<T , float>){
-                                            cublasSgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , reduce_imsize , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            );
-                                        }
-                                        else if constexpr (std::is_same_v<T , double>){
-                                            cublasDgemm(handle , CUBLAS_OP_T , CUBLAS_OP_N
-                                                ,single_kernel_size , reduce_imsize , 1
-                                                , &alpha , kernel_.get() + kerneloutoffset + kernelinoffset , 1,
-                                                grad_out.get() + gradbatchoffset + gradoutoffset , 1 , &beta0 ,
-                                                im2col_buf[cur] , single_kernel_size
-                                            );
-                                        }
-                                        CHECK(cudaEventRecord(ev[cur] , stream_gemm));
-
-                                        if(iter > 0){
-                                            cudaStreamWaitEvent(stream_im2col , ev[prev] , 0);
-                                            Functional::col2im_gpu_nopadding<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                                            , im2col_buf[prev] , single_kernel_size , single_input_shape.size()
-                                            ,kershape.get() , imshape.get() , single_input_size , reduce_imsize);
-                                        }
-
-                                        iter++;
-                                        prev_inputbatchoffset = inputbatchoffset;
-                                        prev_inputinoffset = inputinoffset;
-                                    }
-                                }
+                    }
+                    bias.set_grad(grad_bias);
+                    Tensor<T> grad_in(input.shape() , device);
+                    if(device == Cuda){
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                            resultbatchoffset < grad_out.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            CHECK(cudaMemset(buf , 0 , buf_size));
+                            for(size_t kernelcoutoffset = 0, resultcoutoffset = 0;
+                                kernelcoutoffset < kernel.size();
+                                kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                
+                                CHECK_CUBLAS(
+                                cublasSgemm(handle,
+                                    CUBLAS_OP_T,
+                                    CUBLAS_OP_N,
+                                    ckernelsize,
+                                    outstrides[ndim - 2],
+                                    1,
+                                    &alpha1,
+                                    kernel.get() + kernelcoutoffset,
+                                    1,
+                                    grad_out.get() + resultbatchoffset + resultcoutoffset,
+                                    1,
+                                    &beta1,
+                                    buf,
+                                    ckernelsize
+                                ));
                             }
 
-                            cudaStreamWaitEvent(stream_im2col , ev[(iter + 1) & 1] , 0);
-                            Functional::col2im_gpu_nopadding<<<CudaGetBlocks(reduce_imsize) , kCudaThreadsNum , 0 , stream_im2col>>>(grad_input.get() + prev_inputbatchoffset + prev_inputinoffset 
-                            , im2col_buf[(iter + 1) & 1] , single_kernel_size , single_input_shape.size()
-                            ,kershape.get() , imshape.get() , single_input_size , reduce_imsize);
+                            col2im_gpu_2d<<<CudaGetBlocks(outstrides[ndim - 2]) , kCudaThreadsNum>>>(
+                                grad_in.get() + inputbatchoffset,
+                                buf,
+                                ckernelsize,
+                                kernel_size,
+                                kernel_size,
+                                h,
+                                w,
+                                imsize
+                            );
 
                         }
 
                     }
+                    else{
+                        std::vector<size_t> single_shape(grad_out.shape().begin() + 2 , grad_out.shape().end());
+                        for(size_t inputbatchoffset = 0 , resultbatchoffset = 0;
+                            resultbatchoffset < grad_out.size();
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
+                            memset(buf , 0 , buf_size);
+                            for(size_t kernelcoutoffset = 0, resultcoutoffset = 0;
+                                kernelcoutoffset < kernel.size();
+                                kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
+                                
+                                for(size_t i = 0; i < outstrides[ndim - 2];i++){
+                                    for(size_t k = 0;k < ckernelsize;k++){
+                                        buf[i * ckernelsize + k] += grad_out.get()[resultbatchoffset + resultcoutoffset + i] * kernel.get()[kernelcoutoffset + k];
+                                    }
+                                }
+                            }
+                            MultiDimIndex index(single_shape);
+                            do{
+                                auto & index_ = index.get_index();
+                                size_t m0 , m1;
+                                m0 = index_[0] - (kernel_size >> 1);
+                                m1 = index_[1] - (kernel_size >> 1);
+                                size_t grid_offset =  0;
+                                size_t col_offset;
+                                col_offset = (index_[0] * single_shape[1] + index_[1]) * kernel_size;
+                                size_t grid_index0 , grid_index1 , hw = h * w;
+                                for(size_t coffset = 0;coffset < imsize; coffset += hw){
+                                    for(grid_index0 = 0;grid_index0 < kernel_size;grid_index0++){
+                                        for(grid_index1 = 0;grid_index1 < kernel_size;grid_index1++)
+                                        {
+                                            bool is_valid = true;
+                                            size_t k0 = m0 + grid_index0;
+                                            size_t k1 = m1 + grid_index1;
+                                            is_valid = k0 < h && k1 < w;
+                                            size_t im_offset = k0 * w + k1;
+                                            if(is_valid){
+                                                grad_in.get()[im_offset + coffset + inputbatchoffset] += buf[col_offset];
+                                            }
+                                            grid_offset++;
+                                            col_offset++;
+                                        }
+                                    }
+                                }
+
+
+                                index.next();
+                            }while(!index.is_zero());
+                        }
+                    }
+
+                    return {grad_in};
 
                 }
-                else{
-                    for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                        ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                            for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                                ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                                    Tensor<T> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                    Functional::im2col_ptr<T>(inputtlide.get() , input.get() + inputbatchoffset + inputinoffset
-                                        ,single_input_shape , single_kernel_shape ,  single_input_stride , single_output_stride , input.device());
-                                    for(size_t i = 0;i< inputtlide.shape()[1];i++){
-                                        T sum = 0;
-                                        for(size_t k = 0;k<inputtlide.shape()[0];k++){
-                                            sum += inputtlide.get()[i + inputtlide.shape()[1] * k] * 
-                                            grad_out.get()[gradbatchoffset + gradoutoffset + k];
-                                        }
-                                        grad_kernel.get()[kerneloutoffset + kernelinoffset + i] += sum;
-                                    }
-                            }
-                        }
-                    }
-
-                    kernel_.set_grad(grad_kernel);
-                    for(size_t inputbatchoffset = 0 , gradbatchoffset = 0;inputbatchoffset < input.size()
-                        ;inputbatchoffset += inputstride[input.ndim() - 1] , gradbatchoffset += outstride[outstride.size() - 1]){
-                        for(size_t inputinoffset = 0 , kernelinoffset = 0;kernelinoffset < kernelstride[kernelstride.size() - 1]
-                        ;inputinoffset += inputstride[input.ndim() - 2] , kernelinoffset += kernelstride[kernelstride.size() - 2]){
-                            for(size_t gradoutoffset = 0 , kerneloutoffset = 0;kerneloutoffset < kernel_.size()
-                            ;kerneloutoffset += kernelstride.back() , gradoutoffset += outstride[outstride.size() - 2]){
-                                Tensor<T> inputtlide({inputstride[input.ndim() - 2] ,Functional::prod_vec(single_kernel_shape)} , input.device()) ;
-                                    for(size_t i = 0;i<inputtlide.shape()[0];i++){
-                                        for(size_t j = 0;j < inputtlide.shape()[1];j++){
-                                            inputtlide.get()[i * inputtlide.shape()[1] + j] += 
-                                            grad_out.get()[gradbatchoffset + gradoutoffset + i] * 
-                                            kernel_.get()[kerneloutoffset + kernelinoffset + j];
-                                        }
-                                    }
-                                Functional::col2im_ptr(grad_input.get() + inputbatchoffset + inputinoffset , inputtlide.get()
-                                , single_input_shape , single_kernel_shape , single_input_stride , single_output_stride , input.device());
-                            }
-                        }
-                    }
-
-                }
-                return {grad_input};
             }
+
             std::vector<Tensor<T>> parameters() override{
-                return {kernel_};
+                return {kernel , bias};
             }
+
     };
+
 
 
     template <typename T>
@@ -3431,11 +2655,6 @@ namespace nn{
 
     
 
-    
-    __device__ float warpReduceMax(float val);
-    __device__ float warpReduceSum(float val);
-    __device__ double warpReduceMax_double(double val);
-    __device__ double warpReduceSum_double(double val);
     __global__ void _softmax_kernel_small_512f(float * output, const float * input, const int N, const int C);
     __global__ void _softmax_kernel_small_512d(double * output, const double * input, const int N, const int C);
     __global__ void _softmax_kernel_general_f(float * output, const float * input, const int N, const int C);
@@ -3521,7 +2740,7 @@ namespace nn{
         else if constexpr (std::is_same_v<T , double>){
             l = index < batchsize ? -log(input_softmax[index * step + label_cache[index]]) : 0;
         }
-        l = warpReduceSum(l); // sum in warp
+        l = warpReduceSum<T>(l); // sum in warp
         if(laneId == 0){
             smem_ce[warpId] = l;
         }
@@ -3583,7 +2802,7 @@ namespace nn{
                 if(input.requires_grad()){
                     loss.set_requires_grad(true);
                     loss.set_grad_fn(
-                        std::make_shared<Functional::ModuleFunctionWrapper<float> >(this , input  ));
+                        std::make_shared<Functional::ModuleFunctionWrapper<T> >(this , input  ));
                 }
                 return loss;
             }
@@ -3677,7 +2896,7 @@ namespace nn{
                 sum += input[i + offset];
             }
         }
-        sum = warpReduceSum(sum);
+        sum = warpReduceSum<T>(sum);
         T hw_batch_size = hw * batch_size;
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum / hw_batch_size;
@@ -3699,7 +2918,7 @@ namespace nn{
                 sum += diff * diff;
             }
         }
-        sum = warpReduceSum(sum);
+        sum = warpReduceSum<T>(sum);
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum / hw_batch_size;
         __syncthreads();
@@ -3750,7 +2969,7 @@ namespace nn{
                 sum += grad_out[i + offset];
             }
         }
-        sum = warpReduceSum(sum);
+        sum = warpReduceSum<T>(sum);
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum;
         __syncthreads();
@@ -3784,7 +3003,7 @@ namespace nn{
                 sum += grad_out[i + offset] * (input[i + offset] - mean) * var_inv;
             }
         }
-        sum = warpReduceSum(sum);
+        sum = warpReduceSum<T>(sum);
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum;
         __syncthreads();

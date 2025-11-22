@@ -15,6 +15,7 @@ link_directories("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/bin/x
 set(SRC
     bind.cu
     src/tensor.cu
+    src/nn.cu
 )
 
 pybind11_add_module(mytorch ${SRC})

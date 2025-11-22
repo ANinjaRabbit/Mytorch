@@ -6,8 +6,9 @@ using namespace mytorch;
 int main(){
     Device device = Cuda;
     DefaultDevice = device;
-    auto kernel = rand<float>({2 , 2,3 , 3});
-    nn::Conv<float> conv(kernel,nn::NoPadding);
+    nn::Conv2d<float> conv(2 , 2, 3,nn::NoPadding);
+    auto kernel = conv.parameters()[0];
+    auto bias = conv.parameters()[1];
     auto x = rand<float>({ 1 ,2 , 4 ,4} , device);
     x.print();
     x.set_requires_grad(true);
@@ -18,27 +19,27 @@ int main(){
     loss.print();
     loss = loss * loss;
     loss.print();
-    loss =loss.reshape({4 * 2});
+    loss =loss.reshape({label.size()});
     auto l = loss.sum(0);
     l.zero_grad();
     l.backward();
-    kernel.get_grad_tensor().print();
+    bias.get_grad_tensor().print();
     l.to(Cpu);
-    kernel.to(Cpu);
-    for(int i = 0;i<3;i++){
+    bias.to(Cpu);
+    for(int i = 0;i<2;i++){
         std::cout << "now " << i << " "  << std::endl;
         float epsilon = 0.001;
-        kernel[i] += epsilon;
-        kernel.to(Cuda);
+        bias[i] += epsilon;
+        bias.to(Cuda);
         auto loss = (conv(x) - label);
         loss = loss * loss;
-        loss = loss.reshape({4 * 2});
+        loss = loss.reshape({label.size()});
         auto lep = loss.sum(0);
         lep.to(Cpu);
         float grad = (lep.get()[0] - l.get()[0]) / epsilon;
 
-        kernel.to(Cpu);
-        kernel[i] -= epsilon;
+        bias.to(Cpu);
+        bias[i] -= epsilon;
         std::cout << "grad check " << i << " " << grad  << std::endl;
     }
 }
