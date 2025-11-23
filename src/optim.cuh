@@ -7,25 +7,26 @@ namespace mytorch{
     namespace optim{
 
         template <typename T>
-        __global__ void _sgd_step_kernel(T * param, const T * grad,const T lr , const size_t size){
+        __global__ void _sgd_step_kernel(T * param, const T * grad,const T lr , const T weight_decay , const size_t size){
             size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
             if(idx < size){
-                param[idx] -= lr * grad[idx];
+                param[idx] -= lr * (grad[idx] +  weight_decay * param[idx]);
             }
         }
         
         template <typename T>
         class SGD{
                 T lr_;
+                T weight_decay_;
                 std::vector<Tensor<T>> params_;
                 Device device_;
             public:
-                SGD(std::vector<Tensor<T>> & params, T lr = T(0.01), Device device = DefaultDevice) : lr_(lr) , params_(params) , device_(device){}
+                SGD(std::vector<Tensor<T>> & params, T lr = T(0.01) , T weight_decay = T(0.0) , Device device = DefaultDevice) : lr_(lr) , weight_decay_(weight_decay) , params_(params) , device_(device){}
                 void step(){
                     if(device_ == Device::Cpu){
                         for(auto & param : params_)
                             for(size_t i = 0 ; i < param.size() ; i++)
-                                param.get()[i] -= lr_ * param.get_grad()[i];
+                                param.get()[i] -= lr_ * param.get_grad()[i] + lr_ * weight_decay_ * param.get()[i];
                     }
                     else{
                         for(auto & param : params_){
@@ -34,6 +35,7 @@ namespace mytorch{
                                 param.get(),
                                 param.get_grad().get(),
                                 lr_,
+                                weight_decay_,
                                 param.size()
                             );
                         }
@@ -54,6 +56,7 @@ namespace mytorch{
             const T beta2,
             const T lr,
             const T eps,
+            const T weight_decay,
             const size_t size
         ){
             size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -62,7 +65,7 @@ namespace mytorch{
                 v[idx] = beta2 * v[idx] + (T(1) - beta2) * grad[idx] * grad[idx];
                 T m_hat = m[idx] / (T(1) - pow(beta1, t));
                 T v_hat = v[idx] / (T(1) - pow(beta2, t));
-                param[idx] -= lr * m_hat / (sqrt(v_hat) + eps);
+                param[idx] -= lr * m_hat / (sqrt(v_hat) + eps) + lr * weight_decay * param[idx];
             }
         }
         template <>
@@ -76,6 +79,7 @@ namespace mytorch{
             const float beta2,
             const float lr,
             const float eps,
+            const float weight_decay,
             const size_t size
         ){
             size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -84,7 +88,7 @@ namespace mytorch{
                 v[idx] = beta2 * v[idx] + (1.0 - beta2) * grad[idx] * grad[idx];
                 float m_hat = m[idx] / (1.0 - powf(beta1, t));
                 float v_hat = v[idx] / (1.0 - powf(beta2, t));
-                param[idx] -= lr * m_hat / (sqrtf(v_hat) + eps);
+                param[idx] -= lr * m_hat / (sqrtf(v_hat) + eps) + lr * weight_decay * param[idx];
             }
         }
         template <typename T>
@@ -93,13 +97,14 @@ namespace mytorch{
                 T beta1_;
                 T beta2_;
                 T eps_;
+                T weight_decay_;
                 std::vector<Tensor<T>> params_;
                 std::vector<Tensor<T>> m_;
                 std::vector<Tensor<T>> v_;
                 size_t t_;
                 Device device_;
             public:
-                Adam(std::vector<Tensor<T>> & params,const T lr = T(0.001) ,const T beta1 = T(0.9) , const T beta2 = T(0.999) , const T eps = T(1e-8)  , Device device = DefaultDevice) : lr_(lr) , beta1_(beta1) , beta2_(beta2) , eps_(eps) , params_(params) , device_(device){
+                Adam(std::vector<Tensor<T>> & params,const T lr = T(0.001) ,const T beta1 = T(0.9) , const T beta2 = T(0.999) , const T eps = T(1e-8) , const T weight_decay = T(0) , Device device = DefaultDevice) : lr_(lr) , beta1_(beta1) , beta2_(beta2) , eps_(eps) , params_(params) , weight_decay_(weight_decay) , device_(device){
                     for(auto & param : params_){
                         m_.emplace_back(zeros<T>(param.shape() , param.device()));
                         v_.emplace_back(zeros<T>(param.shape() , param.device()));
@@ -123,6 +128,7 @@ namespace mytorch{
                                 beta2_,
                                 lr_,
                                 eps_,
+                                weight_decay_,
                                 param.size()
                             );
                         }
@@ -136,7 +142,7 @@ namespace mytorch{
                             m = beta1_ * m + (T(1) - beta1_) * grad;
                             v = beta2_ * v + (T(1) - beta2_) * grad * grad;
                             for(size_t j = 0 ; j < param.size() ; j++){
-                                param.get()[j] -= lr_ * m.get()[j] / (T(1) - powf(beta1_, t_)) * (sqrtf(v.get()[j] / (T(1) - powf(beta2_, t_))) + eps_);
+                                param.get()[j] -= lr_ * m.get()[j] / (T(1) - powf(beta1_, t_)) * (sqrtf(v.get()[j] / (T(1) - powf(beta2_, t_))) + eps_) + lr_ * weight_decay_ * param.get()[j];
                             }
                         }
 

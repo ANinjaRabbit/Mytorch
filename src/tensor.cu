@@ -160,14 +160,14 @@ namespace mytorch{
         return nn::Functional::MatmulFunc<T>().forward({*this , other});
     }
     template <typename T>
-    Tensor<T> Tensor<T>::pool2d(const std::vector<size_t> & kernel_shape) const {
+    Tensor<T> Tensor<T>::maxpool2d(const std::vector<size_t> & kernel_shape) const {
         if(this->requires_grad()){
-            auto f =  std::make_shared<nn::Functional::Pool2dFunc<T>>(kernel_shape);
+            auto f =  std::make_shared<nn::Functional::MaxPool2dFunc<T>>(kernel_shape , this->device());
             Tensor<T> result = f->forward({*this});
             result.set_grad_fn(f);
             return result;
         }
-        return nn::Functional::Pool2dFunc<T>(kernel_shape).forward({*this});
+        return nn::Functional::MaxPool2dFunc<T>(kernel_shape , this->device()).forward({*this});
     }
     template <typename T>
     void Tensor<T>::backward(const Tensor<T> & grad_out) {

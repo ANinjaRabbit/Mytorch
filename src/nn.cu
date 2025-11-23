@@ -55,7 +55,8 @@ namespace nn{
         } // get the block maximum
         maxval = maxvals[0];
         if(tid < C){
-            output[tid + idx * C] = expf(x[tid] - maxval); // compute exp(x - max)
+            float val = expf(x[tid] - maxval);
+            output[tid + idx * C] = val == 0 ? 1e-8 : val; // compute exp(x - max)
         }
         __syncthreads();
         float sum = tid < C ? output[tid + idx * C] : 0.0f;

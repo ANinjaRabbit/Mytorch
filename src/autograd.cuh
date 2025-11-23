@@ -44,8 +44,9 @@ namespace mytorch{
             std::reverse(topo_order.begin() , topo_order.end());
             for(auto & node : topo_order){
                 auto grad_fn = node.get_grad_fn();
-                if(grad_fn == nullptr)
+                if(grad_fn == nullptr){
                     continue;
+                }
                 auto inputs = grad_fn->get_inputs();
                 auto input_grads = grad_fn->backward(node_to_output_grads_dict[node]);
                 for(int i = 0 ; i < input_grads.size() ; i++){

@@ -297,6 +297,18 @@ namespace mytorch{
                     CHECK(cudaMemcpy(data_ , data.data() , size_ * sizeof(T) , cudaMemcpyHostToDevice));
                 }
             }
+            void inplace_zero(){
+                if(!data_){
+                    std::cerr << "cuda_shared_pointer is null! Cannot inplace_zero!" << std::endl;
+                    throw std::runtime_error("cuda_shared_pointer is null! Cannot inplace_zero!");
+                }
+                if(device_ == Cpu){
+                    memset(data_ , 0 , size_ * sizeof(T));
+                }
+                else{
+                    CHECK(cudaMemset(data_ , 0 , size_ * sizeof(T)));
+                }
+            }
     };
 
 
@@ -336,6 +348,10 @@ namespace mytorch{
             friend class nn::Functional::TransposeFunc<T>;
             friend class nn::Functional::ReshapeFunc<T>;
             friend class nn::Functional::MatmulFunc<T>;
+
+            void inplace_zero(){
+                data_.inplace_zero();
+            }
 
             TensorRaw<T>(const T * data , const std::vector<size_t> & shape , const Device device = DefaultDevice){
                 size_ = get_strides_with_shape(shape);
@@ -870,6 +886,13 @@ namespace mytorch{
                 return data_ptr_->get_strides();
             }
 
+            void inplace_zero(){
+                if(!data_ptr_){
+                    throw std::runtime_error("inplace_zero() on null tensor");
+                }
+                data_ptr_->inplace_zero();
+            }
+
 
             Tensor(const std::vector<size_t> & shape ,const Device device=DefaultDevice){
                 data_ptr_ = std::make_shared<TensorRaw<T>>(shape , device);
@@ -920,7 +943,7 @@ namespace mytorch{
             Tensor<T> transpose(const std::vector<size_t> & perm = {}) const;
             Tensor<T> reshape(const std::vector<size_t> & newshape) const;
             Tensor<T> matmul(const Tensor<T> & b) const;
-            Tensor<T> pool2d(const std::vector<size_t> & kernel_shape) const;
+            Tensor<T> maxpool2d(const std::vector<size_t> & kernel_shape) const;
             Tensor<T> sum(const size_t  axis) const;
             Tensor<T> expand(const size_t axis) const{
                 if(!data_ptr_){

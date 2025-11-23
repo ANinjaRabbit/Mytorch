@@ -66,7 +66,7 @@ void bind_tensor(py::module &m) {
             }
              , py::arg("perm") = py::none(), "Transpose Tensor dimensions.")
         .def("matmul", &Tensor<T>::matmul, "Matrix multiplication.")
-        .def("pool2d", &Tensor<T>::pool2d, "2D pooling operation.")
+        .def("maxpool2d", &Tensor<T>::maxpool2d, "2D max pooling operation.")
         .def("expand", &Tensor<T>::expand, "Expand Tensor to a new shape (broadcasting).")
         .def("print", &Tensor<T>::print, "Print the Tensor contents.")
         .def("deepcopy", &Tensor<T>::deepcopy, "Return a deep copy of the Tensor.")
@@ -113,7 +113,7 @@ void bind_function(py::module &m_func) {
     BIND_FUNC(ReLUFunc);
     BIND_FUNC(SigmoidFunc);
     BIND_FUNC(TransposeFunc);
-    BIND_FUNC(Pool2dFunc);
+    BIND_FUNC(MaxPool2dFunc);
     BIND_FUNC(ReshapeFunc);
     BIND_FUNC(MatmulFunc);
     BIND_FUNC(ModuleFunctionWrapper);
@@ -137,6 +137,7 @@ void bind_module(py::module &m_mod) {
         .def("_internal_backward", &Module<T>::_internal_backward, "Backward pass (computes parameter gradients).")
         .def("parameters", &Module<T>::parameters, "Return a list of learnable parameters.")
         .def("__call__" , (Tensor<T>(Module<T>::*)(const Tensor<T>&)) &Module<T>::operator() , "Forward pass through the module for only one input.")
+        .def("set_train" , &Module<T>::set_train , "Set the module to training mode or not.")
         ;
 
         // Subclasses
@@ -150,21 +151,26 @@ void bind_module(py::module &m_mod) {
             }
         ) , py::arg("in_features") , py::arg("out_features") , py::arg("device") = py::none());
 
-        py::class_<Conv<T>, Module<T>, std::shared_ptr<Conv<T>>>(m_mod, "Conv",
+        py::class_<Conv2d<T>, Module<T>, std::shared_ptr<Conv2d<T>>>(m_mod, "Conv2d",
             "Convolutional layer using a learnable kernel.")
-        .def(py::init([]( const std::vector<size_t> & kernel_shape , py::object padding_mode_obj , py::object device_obj)
+        .def(py::init([](const size_t in_features , const size_t out_features , const size_t kernel_size , py::object padding_mode_obj , py::object device_obj)
         {
-            PaddingMode padding_mode = padding_mode_obj.is_none() ? PaddingMode::ZeroPadding : padding_mode_obj.cast<PaddingMode>();
+            PaddingMode padding_mode = padding_mode_obj.is_none() ? PaddingMode::NoPadding : padding_mode_obj.cast<PaddingMode>();
             Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
-            return std::make_shared<Conv<T>>(kernel_shape , padding_mode , device);
+            return std::make_shared<Conv2d<T>>(in_features , out_features , kernel_size , padding_mode , device);
         }
-        ) , py::arg("kernel_shape") , py::arg("padding_mode") = py::none() , py::arg("device") = py::none())
+        ) , py::arg("in_features") , py::arg("out_features") , py::arg("kernel_size") , py::arg("padding_mode") = py::none() , py::arg("device") = py::none())
         ;
 
-
-    py::class_<Pool2d<T>, Module<T>, std::shared_ptr<Pool2d<T>>>(m_mod, "Pool2d",
-        "2D pooling layer (e.g., max pooling).")
-        .def(py::init<std::vector<size_t>>(), py::arg("kernel_shape"));
+    
+    py::class_<MaxPool2d<T>, Module<T>, std::shared_ptr<MaxPool2d<T>>>(m_mod, "MaxPool2d",
+        "2D max pooling layer.")
+        .def(py::init([](const std::vector<size_t> & kernel_shape , py::object device_obj)
+        {
+            Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+            return std::make_shared<MaxPool2d<T>>(kernel_shape , device);
+        }
+        ) , py::arg("kernel_shape") , py::arg("device") = py::none());
 
     py::class_<Softmax<T>, Module<T>, std::shared_ptr<Softmax<T>>>(m_mod, "Softmax",
         "Softmax activation module.")
@@ -172,7 +178,12 @@ void bind_module(py::module &m_mod) {
 
     py::class_<CrossEntropy<T>, Module<T>, std::shared_ptr<CrossEntropy<T>>>(m_mod, "CrossEntropy",
         "CrossEntropy loss function.")
-        .def(py::init<const std::vector<size_t>&>(), py::arg("label_cache"));
+        .def(py::init<>())
+        .def("__call__" , [](CrossEntropy<T> & self , const Tensor<T> & y_pred , const Tensor<T> & y_true)
+        {
+            return self.forward({y_pred , y_true});
+        } , py::arg("y_pred") , py::arg("y_true"))
+        ;
     
     py::class_<ReLU<T> , Module<T> , std::shared_ptr<ReLU<T>>>(m_mod, "ReLU",
         "ReLU activation module.")
@@ -223,13 +234,16 @@ void bind_optim(py::module &m_optim) {
         )doc")
         .def(py::init([](std::vector<Tensor<T>> &params,
                  T lr,
+                 T weight_decay,
                  py::object device_obj)
             {
                 Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
                 return std::make_shared<SGD<T>>(params, lr, device);
             }),
             py::arg("params"),
+            py::kw_only(),
             py::arg("lr") = T(0.01),
+            py::arg("weight_decay") = T(0.0),
             py::arg("device") = py::none())
         .def("step", &SGD<T>::step, "Perform one SGD update step.");
 
@@ -244,6 +258,7 @@ void bind_optim(py::module &m_optim) {
             beta1 (float): Exponential decay for first moment. Default: 0.9
             beta2 (float): Exponential decay for second moment. Default: 0.999
             eps (float): Numerical stability constant. Default: 1e-8
+            weight_decay (float): Weight decay (L2 penalty). Default: 0
             device (Device): Compute device. Default: DefaultDevice
 
         Methods:
@@ -254,23 +269,25 @@ void bind_optim(py::module &m_optim) {
                 T beta1,
                 T beta2,
                 T eps,
+                T weight_decay,
                 py::object device_obj)
             {
                 Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
-                return std::make_shared<Adam<T>>(params, lr, beta1, beta2, eps, device);
+                return std::make_shared<Adam<T>>(params, lr, beta1, beta2, eps, weight_decay, device);
             }),
             py::arg("params"),
             py::arg("lr") = T(0.001),
             py::arg("beta1") = T(0.9),
             py::arg("beta2") = T(0.999),
             py::arg("eps") = T(1e-8),
+            py::arg("weight_decay") = T(0),
             py::arg("device") = py::none())
         .def("step", &Adam<T>::step, "Perform one Adam update step.");
 }
 
 
 template <typename T>
-Tensor<T> tensor_from_numpy(py::array_t<float> data , Device device = Device::Cpu)
+Tensor<T> tensor_from_numpy(py::array_t<float> data , Device device = DefaultDevice)
 {
     std::vector<size_t> shape(data.ndim());
     for (size_t i = 0; i < data.ndim(); ++i) {
