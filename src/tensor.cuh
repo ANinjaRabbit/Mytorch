@@ -77,7 +77,7 @@ namespace mytorch{
         }
     }
 
-    const size_t kCudaThreadsNum = 512;
+    const size_t kCudaThreadsNum = 1024;
     __host__ __device__ inline int CudaGetBlocks(const int N) {
         return(N + kCudaThreadsNum-1) / kCudaThreadsNum;
     }
@@ -916,7 +916,7 @@ namespace mytorch{
             template <typename U>
             friend Tensor<U> full(const std::vector<size_t>& shape, const U value  , const Device device );
             template <typename U>
-            friend Tensor<U> make_view(cuda_shared_pointer<U> & data , const std::vector<size_t> & shape);
+            friend Tensor<U> make_view(const cuda_shared_pointer<U> & data , const std::vector<size_t> & shape);
             // no need for destruction
             void print() const {
                 if(!data_ptr_){
@@ -1164,7 +1164,7 @@ namespace mytorch{
         }
     };
     template <typename T>
-    Tensor<T> make_view(cuda_shared_pointer<T> & data , const std::vector<size_t> & shape){
+    Tensor<T> make_view(const cuda_shared_pointer<T> & data , const std::vector<size_t> & shape){
         Tensor<T> result;
         result.data_ptr_ = std::make_shared<TensorRaw<T>>(data , shape);
         return result;

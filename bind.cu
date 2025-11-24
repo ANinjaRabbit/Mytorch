@@ -137,7 +137,8 @@ void bind_module(py::module &m_mod) {
         .def("_internal_backward", &Module<T>::_internal_backward, "Backward pass (computes parameter gradients).")
         .def("parameters", &Module<T>::parameters, "Return a list of learnable parameters.")
         .def("__call__" , (Tensor<T>(Module<T>::*)(const Tensor<T>&)) &Module<T>::operator() , "Forward pass through the module for only one input.")
-        .def("set_train" , &Module<T>::set_train , "Set the module to training mode or not.")
+        .def("train" , &Module<T>::train , "Set the module to training mode.")
+        .def("eval" , &Module<T>::eval , "Set the module to evaluation mode.")
         ;
 
         // Subclasses
@@ -199,14 +200,17 @@ void bind_module(py::module &m_mod) {
             T momentum = momentum_obj.is_none() ? T(0.1) : momentum_obj.cast<T>();
             Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
             return std::make_shared<BatchNorm2d<T>>(num_features , momentum , device);
-        }) , py::arg("num_features") , py::arg("momentum") = py::none() , py::arg("device") = py::none());
+        }) , py::arg("num_features") , py::arg("momentum") = py::none() , py::arg("device") = py::none())
+        .def("train" , &BatchNorm2d<T>::train , "Set the module to training mode.")
+        .def("eval" , &BatchNorm2d<T>::eval , "Set the module to evaluation mode.");
 
     py::class_<Sequential<T> , Module<T> , std::shared_ptr<Sequential<T>>>(m_mod, "Sequential",
         "Container for a sequence of modules.")
         .def(py::init([](std::vector<std::shared_ptr<Module<T>>> &modules){
             return std::make_shared<Sequential<T>>(modules);
         }) , py::arg("modules"))
-        .def("set_train" , &Sequential<T>::set_train , py::arg("train") = true);
+        .def("train" , &Sequential<T>::train , "Set the module to training mode.")
+        .def("eval" , &Sequential<T>::eval , "Set the module to evaluation mode.");
     
     py::class_<Flatten<T> , Module<T> , std::shared_ptr<Flatten<T>>>(m_mod, "Flatten",
         "Flatten layer to convert multi-dimensional input to a 1D vector.")
@@ -218,9 +222,14 @@ void bind_module(py::module &m_mod) {
 template <typename T>
 void bind_optim(py::module &m_optim) {
     using namespace mytorch::optim;
+    // ---------------- Optimizer ----------------
+    py::class_<Optimizer<T> , std::shared_ptr<Optimizer<T>>>(m_optim, "Optimizer",
+        "Base class for optimizers.")
+        .def(py::init<T , T>() , py::kw_only() , py::arg("lr") = T(0.01) , py::arg("weight_decay") = T(0.0))
+        .def("step", &Optimizer<T>::step, "Update all parameters in-place.");
 
     // ---------------- SGD ----------------
-    py::class_<SGD<T> , std::shared_ptr<SGD<T>>>(m_optim, "SGD",
+    py::class_<SGD<T> , Optimizer<T> , std::shared_ptr<SGD<T>>>(m_optim, "SGD",
         R"doc(
         Stochastic Gradient Descent optimizer.
 
@@ -248,7 +257,7 @@ void bind_optim(py::module &m_optim) {
         .def("step", &SGD<T>::step, "Perform one SGD update step.");
 
     // ---------------- Adam ----------------
-    py::class_<Adam<T> , std::shared_ptr<Adam<T>>>(m_optim, "Adam",
+    py::class_<Adam<T> , Optimizer<T> , std::shared_ptr<Adam<T>>>(m_optim, "Adam",
         R"doc(
         Adam optimizer.
 
@@ -283,6 +292,54 @@ void bind_optim(py::module &m_optim) {
             py::arg("weight_decay") = T(0),
             py::arg("device") = py::none())
         .def("step", &Adam<T>::step, "Perform one Adam update step.");
+
+        auto m_lr = m_optim.def_submodule("lr_scheduler" , "Learning rate scheduler.");
+        using namespace mytorch::optim::lr_scheduler;
+
+        // ---------------- LR Scheduler ----------------
+        py::class_<StepLR<T> , std::shared_ptr<StepLR<T>>>(m_lr, "StepLR",
+        R"doc(
+        Step learning rate scheduler.
+
+        Args:
+            optimizer (Optimizer): Optimizer to schedule.
+            gamma (float): Multiplicative factor of learning rate decay. Default: 0.1
+            step_size (int): Period of learning rate decay. Default: 100
+
+        Methods:
+            step(): Update learning rate for each parameter group.
+        )doc")
+        .def(py::init([](std::shared_ptr<Optimizer<T>> optimizer, T gamma, size_t step_size)
+            {
+                return std::make_shared<StepLR<T>>(optimizer, gamma, step_size);
+            }),
+            py::arg("optimizer"),
+            py::arg("gamma") = T(0.1),
+            py::arg("step_size") = size_t(100))
+        .def("step", &StepLR<T>::step, "Update learning rate for each parameter group.");
+
+
+
+        py::class_<CosineAnnealingLR<T> , std::shared_ptr<CosineAnnealingLR<T>>>(m_lr, "CosineAnnealingLR",
+        R"doc(
+        Cosine annealing learning rate scheduler.
+
+        Args:
+            optimizer (Optimizer): Optimizer to schedule.
+            T_max (int): Maximum number of iterations.
+            eta_min (float): Minimum learning rate. Default: 0
+
+        Methods:
+            step(): Update learning rate for each parameter group.
+        )doc")
+        .def(py::init([](std::shared_ptr<Optimizer<T>> optimizer, T T_max, T eta_min = T(0))
+            {
+                return std::make_shared<CosineAnnealingLR<T>>(optimizer, T_max, eta_min);
+            }),
+            py::arg("optimizer"),
+            py::arg("T_max"),
+            py::arg("eta_min") = T(0))
+        .def("step", &CosineAnnealingLR<T>::step, "Update learning rate for each parameter group.");
 }
 
 

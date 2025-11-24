@@ -29,14 +29,17 @@ namespace nn{
                 return {}; // default no backward
             }
             virtual std::vector<Tensor<T>> parameters(){return {};};
-            virtual void set_train(bool train){
-                training = train;
+            virtual void train(){
+                training = true;
+            }
+            virtual void eval(){
+                training = false;
             }
     };
 
-    template <typename T>
+    template <typename T , size_t N = 32>
     __device__ T warpReduceMax(T val);
-    template <typename T>
+    template <typename T , size_t N = 32>
     __device__ T warpReduceSum(T val);
 
     template <typename T>
@@ -62,10 +65,16 @@ namespace nn{
                 }
                 return params;
             }
-            void set_train(bool train){
-                training = train;
+            void train() override{
+                training = true;
                 for(auto & module : modules_){
-                    module->set_train(train);
+                    module->train();
+                }
+            }
+            void eval() override{
+                training = false;
+                for(auto & module : modules_){
+                    module->eval();
                 }
             }
     };
@@ -1286,8 +1295,7 @@ namespace nn{
                     if(input[0].requires_grad()){
                         a = input[0];
                     }
-                    Tensor<T> result(newshape , input[0].device());
-                    result.get_shared_ptr() = input[0].get_shared_ptr();
+                    Tensor<T> result = make_view<T>(input[0].get_shared_ptr() , newshape);
                     result.set_requires_grad(input[0].requires_grad());
                     return result;
                 }
@@ -1872,7 +1880,7 @@ namespace nn{
         int cid = blockIdx.x;
         int warpId = tid / 32;
         int laneId = tid % 32;
-        constexpr int warpsPerBlock =   kCudaThreadsNum / 32;
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
         T sum = 0;
         int chw = c * hw;
         for(int offset = cid * hw;offset < size; offset += chw){
@@ -1884,12 +1892,12 @@ namespace nn{
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum;
         __syncthreads();
-        if(tid == 0){
-            T val = bn_smem[0];
-            for(int i = 1;i < warpsPerBlock;i++){
-                val += bn_smem[i];
+        if(tid < warpsPerBlock){
+            sum = bn_smem[tid];
+            sum = warpReduceSum<T , warpsPerBlock>(sum);
+            if(tid == 0){
+                grad_bias[cid] = sum;
             }
-            grad_bias[cid] = val;
         }
     }
 
@@ -2759,7 +2767,7 @@ namespace nn{
         T * smem_ce = reinterpret_cast<T *>(smem);
         int warpId = threadIdx.x / 32;
         int laneId = threadIdx.x % 32;
-        int warpsPerBlock = blockDim.x / 32;
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
         T l;
         if constexpr (std::is_same_v<T , float>){
             l = index < batchsize ? -logf(input_softmax[index * step + (size_t)label_cache[index]]) : 0;
@@ -2772,17 +2780,14 @@ namespace nn{
             smem_ce[warpId] = l / batchsize;
         }
         __syncthreads();
-        if(threadIdx.x == 0){
-            float val = smem_ce[0];
-            for(int i = 1;i < warpsPerBlock;i++){
-                val += smem_ce[i];
+        int tid = threadIdx.x;
+        if(tid  < warpsPerBlock){
+            l = smem_ce[tid];
+            l = warpReduceSum<T , warpsPerBlock>(l);
+            if(tid == 0){
+                atomicAdd(loss , l);
             }
-            atomicAdd(loss , val);
         }
-    }
-    template <typename T>
-    __global__ void divideSingleElement(T * loss , const T batchsize){
-        loss[0] /= batchsize;
     }
 
 
@@ -2898,16 +2903,17 @@ namespace nn{
     };
 
     template <typename T>
-    __global__ void _batch_norm_kernel1(
-        T * out_mean, T * out_var,
-        const T * input , const size_t hw , const size_t c , const size_t batch_size , const size_t size ,const T momentum){
+    __global__ void _batch_norm_forward_kernel(
+        T * result , T * xhat_cache, T * var_inv_cache, T * running_mean , T * running_var,
+        const T * input , const T * gamma , const T * beta , const size_t hw , const size_t c , const size_t batch_size , const size_t size ,const T momentum){
         extern __shared__ char smem[];
         T * bn_smem = reinterpret_cast<T *>(smem);
+        constexpr T epsilon = 1e-8;
         int tid = threadIdx.x;
         int cid = blockIdx.x;
         int warpId = tid / 32;
         int laneId = tid % 32;
-        constexpr int warpsPerBlock =   kCudaThreadsNum / 32;
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
         T sum = 0;
         int chw = c * hw;
         for(int offset = cid * hw;offset < size; offset += chw){
@@ -2919,17 +2925,17 @@ namespace nn{
         T hw_batch_size = hw * batch_size;
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum / hw_batch_size;
-        __syncthreads();
-        if(tid == 0){
-            T val = bn_smem[0];
-            for(int i = 1;i < warpsPerBlock;i++){
-                val += bn_smem[i];
+        if(tid < warpsPerBlock){
+            sum = bn_smem[tid];
+            sum = warpReduceSum<T , warpsPerBlock>(sum);
+            if(tid == 0){
+                running_mean[cid] = sum * momentum + running_mean[cid] * (1 - momentum);
+                bn_smem[0] = sum;
             }
-            out_mean[cid] = val * momentum + out_mean[cid] * (1 - momentum);
         }
         __syncthreads();
         sum = 0;
-        const T mean = out_mean[cid];
+        const T mean = bn_smem[0];
         
         for(int offset = cid * hw;offset < size; offset += chw){
             for(int i = tid;i < hw;i += kCudaThreadsNum){
@@ -2941,26 +2947,37 @@ namespace nn{
         __syncthreads();
         if(laneId == 0) bn_smem[warpId] = sum / hw_batch_size;
         __syncthreads();
-        if(tid == 0){
-            T val = bn_smem[0];
-            for(int i = 1;i < warpsPerBlock;i++){
-                val += bn_smem[i];
+        if(tid < warpsPerBlock){
+            sum = bn_smem[tid];
+            sum = warpReduceSum<T , warpsPerBlock>(sum);
+            if(tid == 0){
+                var_inv_cache[cid] = rsqrt(sum + epsilon);
+                running_var[cid] = sum * momentum + running_var[cid] * (1 - momentum);
             }
-            out_var[cid] = val * momentum + out_var[cid] * (1 - momentum);
         }
-
+        __syncthreads();
+        T var_inv = var_inv_cache[cid];
+        T gamma_cid = gamma[cid];
+        T beta_cid = beta[cid];
+        for(int offset = cid * hw;offset < size; offset += chw){
+            for(int i = tid;i < hw;i += kCudaThreadsNum){
+                T diff = input[i + offset] - mean;
+                T xhat = diff * var_inv;
+                xhat_cache[i + offset] = xhat;
+                result[i + offset] = gamma_cid * xhat + beta_cid;
+            }
+        }
     }
     template <typename T>
     __global__ void _batch_norm_kernel2(
-        T * output , const T * input , const T * running_mean , const T * running_var , const T * gamma , const T * beta , const T epsilon,
+        T * output , const T * input , const T * running_mean , const T * var_inv_cache , const T * gamma , const T * beta , const T epsilon,
         const size_t hw , const size_t c , const size_t batch_size , const size_t size
     ){
         int tid = threadIdx.x;
         int cid = blockIdx.x;
         int chw = c * hw;
         T mean = running_mean[cid];
-        T var = running_var[cid];
-        T var_inv = rsqrt(var + epsilon);
+        T var_inv = var_inv_cache[cid];
         T gamma_cid = gamma[cid];
         T beta_cid = beta[cid];
         for(int offset = cid * hw;offset < size; offset += chw){
@@ -2970,86 +2987,73 @@ namespace nn{
             }
         }
     }
-    template <typename T>
-    __global__ void _batch_norm_kernel_beta(
-        T * grad_in,
-        const T * grad_out , const size_t hw , const size_t c , const size_t size){
-        extern __shared__ char smem[];
-        T * bn_smem = reinterpret_cast<T *>(smem);
-        int tid = threadIdx.x;
-        int cid = blockIdx.x;
-        int warpId = tid / 32;
-        int laneId = tid % 32;
-        constexpr int warpsPerBlock =   kCudaThreadsNum / 32;
-        T sum = 0;
-        int chw = c * hw;
-        for(int offset = cid * hw;offset < size; offset += chw){
-            for(int i = tid;i < hw;i += kCudaThreadsNum){
-                sum += grad_out[i + offset];
-            }
-        }
-        sum = warpReduceSum<T>(sum);
-        __syncthreads();
-        if(laneId == 0) bn_smem[warpId] = sum;
-        __syncthreads();
-        if(tid == 0){
-            T val = bn_smem[0];
-            for(int i = 1;i < warpsPerBlock;i++){
-                val += bn_smem[i];
-            }
-            grad_in[cid] = val;
-        }
 
-    }
     template <typename T>
-    __global__ void _batch_norm_kernel_gamma(
-        T * grad_gamma , const T * grad_out , const T * input , const T * running_mean , const T * running_var , const T * gamma  , const T epsilon,
+    __global__ void _batch_norm_kernel_gamma_beta(
+        T * grad_gamma , T * grad_beta , const T * grad_out , const T * input , const T * xhat_cache  , const T epsilon,
         const size_t hw , const size_t c  , const size_t size
     ){
         extern __shared__ char smem[];
         T * bn_smem = reinterpret_cast<T *>(smem);
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
+        T * bn_smem_beta = bn_smem + warpsPerBlock;
         int tid = threadIdx.x;
         int cid = blockIdx.x;
         int warpId = tid / 32;
         int laneId = tid % 32;
-        constexpr int warpsPerBlock =   kCudaThreadsNum / 32;
-        T sum = 0;
+        T sum_gamma = 0;
+        T sum_beta = 0;
         int chw = c * hw;
-        T mean = running_mean[cid];
-        T var_inv = rsqrt(running_var[cid] + epsilon);
         for(int offset = cid * hw;offset < size; offset += chw){
             for(int i = tid;i < hw;i += kCudaThreadsNum){
-                sum += grad_out[i + offset] * (input[i + offset] - mean) * var_inv;
+                sum_gamma += grad_out[i + offset] * xhat_cache[i + offset];
+                sum_beta += grad_out[i + offset];
             }
         }
-        sum = warpReduceSum<T>(sum);
+        sum_gamma = warpReduceSum<T>(sum_gamma);
+        sum_beta = warpReduceSum<T>(sum_beta);
         __syncthreads();
-        if(laneId == 0) bn_smem[warpId] = sum;
+        if(laneId == 0){ 
+             bn_smem[warpId] = sum_gamma;
+             bn_smem_beta[warpId] = sum_beta;
+        }
         __syncthreads();
-        if(tid == 0){
-            T val = bn_smem[0];
-            for(int i = 1;i < warpsPerBlock;i++){
-                val += bn_smem[i];
+        if(tid < warpsPerBlock){
+            sum_gamma = bn_smem[tid];
+            sum_beta = bn_smem_beta[tid];
+            sum_gamma = warpReduceSum<T , warpsPerBlock>(sum_gamma);
+            sum_beta = warpReduceSum<T , warpsPerBlock>(sum_beta);
+            if(tid == 0){
+                grad_gamma[cid] = sum_gamma;
+                grad_beta[cid] = sum_beta;
             }
-            grad_gamma[cid] = val;
         }
     }
 
     template <typename T>
     __global__ void _batch_norm_kernel_in(
-        T * grad_in , const T * grad_out , const T * running_var , const T * gamma, const T epsilon,
-        const int hw , const int c , const int size
+        T * grad_in , const T * grad_out , const T * xhat_cache , const T * var_inv_cache , const T * grad_beta , const T * grad_gamma , const T * gamma , const T epsilon,
+        const int hw , const int c , const int batch_size , const int size 
     ){
         int tid = threadIdx.x;
         int cid = blockIdx.x;
         int chw = c * hw;
-        T var = running_var[cid];
-        T var_inv = rsqrt(var + epsilon);
+        int hw_batch_size = hw * batch_size;
+        T var_inv = var_inv_cache[cid];
         T gamma_cid = gamma[cid];
+        T coefficient = var_inv * gamma_cid / hw_batch_size;
         for(int offset = cid * hw;offset < size; offset += chw){
             for(int i = tid;i < hw;i += kCudaThreadsNum){
-                grad_in[i + offset ] = grad_out[i + offset] * gamma_cid * var_inv;
+                grad_in[i + offset ] = (hw_batch_size * grad_out[i + offset] - grad_beta[cid] - grad_gamma[cid] * xhat_cache[i + offset]) * coefficient;
             }
+        }
+    }
+
+    template <typename T>
+    __global__ void _calculate_inv_var(T * var_inv_cache , const T * var ,const size_t size , const T epsilon){
+        int index = threadIdx.x + blockIdx.x * blockDim.x;
+        if(index < size){
+            var_inv_cache[index] = sqrtf(var[index] + epsilon);
         }
     }
 
@@ -3060,14 +3064,26 @@ namespace nn{
         size_t c;
         Tensor<T> gamma , beta;
         Tensor<T> running_mean , running_var;
+        Tensor<T> xhat_cache , var_inv_cache;
         Tensor<T> input_cache;
         T momentum;
+        T epsilon;
         public:
              BatchNorm2d(const size_t num_features , T momentum = 0.1 , Device device = DefaultDevice) : c(num_features) , momentum(momentum){
                 gamma = ones<T>({num_features} , device);
                 beta = zeros<T>({num_features} , device);
                 running_mean = zeros<T>({num_features} , device);
                 running_var = ones<T>({num_features} , device);
+                var_inv_cache = Tensor<T>({num_features} , false ,  device);
+                epsilon = 1e-8;
+            }
+            void train() override{
+                this->training = true;
+            }
+            void eval() override{
+                this->training = false;
+                _calculate_inv_var<T><<< CudaGetBlocks(c) , kCudaThreadsNum>>>(var_inv_cache.get() , running_var.get() , c , epsilon);
+                xhat_cache = Tensor<T>(); // clear cache
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                 if(inputs.size() != 1){
@@ -3080,6 +3096,9 @@ namespace nn{
                 }
                 auto inputshape = input.shape();
                 Tensor<T> result(inputshape , 0 , input.device());
+                if(xhat_cache.is_null() || xhat_cache.shape() != inputshape){
+                    xhat_cache = Tensor<T>(inputshape , false , input.device());
+                }
                 if(this->training){
                     int n = inputshape[0];
                     int h = inputshape[2];
@@ -3089,12 +3108,9 @@ namespace nn{
                     int size = chw * n;
                     int hw_batch_size = hw * n;
                     if(input.device() == Cuda){
-                        _batch_norm_kernel1<T><<<c , kCudaThreadsNum , sizeof(T) * (kCudaThreadsNum / 32)>>>(
-                            running_mean.get() , running_var.get() , input.get() , hw  , c , n , size , momentum
-                        );
-                        _batch_norm_kernel2<T><<<c , kCudaThreadsNum>>>(
-                            result.get() , input.get() , running_mean.get() , running_var.get() , gamma.get() , beta.get() , 1e-8,
-                            hw  , c , n , size
+                        _batch_norm_forward_kernel<T><<<c , kCudaThreadsNum , sizeof(T) * (kCudaThreadsNum / 32)>>>(
+                            result.get(),
+                            xhat_cache.get() , var_inv_cache.get() , running_mean.get() , running_var.get() , input.get() , gamma.get() , beta.get() , hw  , c , n , size , momentum
                         );
                     }
                     else{
@@ -3114,16 +3130,17 @@ namespace nn{
                                 }
                             }
                             var /= hw_batch_size;
+                            T var_inv = rsqrt(var + epsilon);
+                            var_inv_cache[cid] = var_inv;
                             running_mean[cid] = mean * momentum + running_mean[cid] * (1 - momentum);
                             running_var[cid] = var * momentum + running_var[cid] * (1 - momentum);
-                            T var_inv = rsqrt(running_var[cid] + 1e-8);
-                            mean = running_mean[cid];
                             T gamma_cid = gamma[cid];
                             T beta_cid = beta[cid];
                             for(int offset = cid * hw;offset < size; offset += chw){
                                 for(int i = 0;i < hw;i++){
                                     T diff = input[i + offset] - mean;
-                                    result[i + offset] = gamma_cid * diff * var_inv + beta_cid;
+                                    xhat_cache[i + offset] = diff * var_inv;
+                                    result[i + offset] = gamma_cid * xhat_cache[i + offset] + beta_cid;
                                 }
                             }
                         }
@@ -3139,13 +3156,13 @@ namespace nn{
                     int size = chw * n;
                     if(input.device() == Cuda){
                         _batch_norm_kernel2<T><<<c , kCudaThreadsNum>>>(
-                            result.get() , input.get() , running_mean.get() , running_var.get() , gamma.get() , beta.get() , 1e-8,
+                            result.get() , input.get() , running_mean.get() , var_inv_cache.get() , gamma.get() , beta.get() , epsilon,
                             hw  , c , n , size
                         );
                     }
                     else{
                         for(int cid = 0; cid < c;cid++){
-                            T var_inv = rsqrt(running_var[cid] + 1e-8);
+                            T var_inv = var_inv_cache[cid];
                             T mean = running_mean[cid];
                             T gamma_cid = gamma[cid];
                             T beta_cid = beta[cid];
@@ -3176,37 +3193,36 @@ namespace nn{
                 Tensor<T> grad_gamma({c} , input.device());
                 int hw = h * w;
                 int chw = c * hw;
+                int hw_batch_size = hw * n;
                 int size = chw * n;
                 if(input.device() == Cuda){
-                    _batch_norm_kernel_beta<T><<<c , kCudaThreadsNum , sizeof(T) * (kCudaThreadsNum / 32)>>>(
-                        grad_beta.get() , grad_out.get() , hw , c , size
-                    );
-                    _batch_norm_kernel_gamma<T><<<c , kCudaThreadsNum , sizeof(T) * (kCudaThreadsNum / 32)>>>(
-                        grad_gamma.get() , grad_out.get() , input.get() , running_mean.get() , running_var.get() , gamma.get() , 1e-8,
+                    _batch_norm_kernel_gamma_beta<T><<<c , kCudaThreadsNum , sizeof(T) * (kCudaThreadsNum / 32) * 2>>>(
+                        grad_gamma.get() , grad_beta.get() , grad_out.get() , input.get() ,xhat_cache.get()  , epsilon,
                         hw , c , size
                     );
                     _batch_norm_kernel_in<T> <<< c , kCudaThreadsNum>>>(
-                        grad_in.get() , grad_out.get() , running_var.get() , gamma.get() , 1e-8,
-                        hw , c , size
+                        grad_in.get() , grad_out.get() , xhat_cache.get() , var_inv_cache.get() , grad_beta.get() , grad_gamma.get() , gamma.get() , epsilon,
+                        hw , c , n , size
                     );
                 }
                 else{
                     for(int cid = 0; cid < c;cid++){
                         T sum_grad = 0;
                         T sum_grad_gamma = 0;
-                        T mean = running_mean[cid];
-                        T var_inv = rsqrt(running_var[cid] + 1e-8);
+                        T var_inv = var_inv_cache[cid];
                         for(int offset = cid * hw;offset < size; offset += chw){
                             for(int i = 0;i < hw;i++){
                                 sum_grad += grad_out[i + offset];
-                                sum_grad_gamma += grad_out[i + offset] * (input[i + offset] - mean) * var_inv;
+                                sum_grad_gamma += grad_out[i + offset] * xhat_cache[i + offset];
                             }
                         }
                         grad_beta[cid] = sum_grad;
                         grad_gamma[cid] = sum_grad_gamma;
+
+                        T coefficient = var_inv * gamma[cid] / hw_batch_size;
                         for(int offset = cid * hw;offset < size; offset += chw){
                             for(int i = 0;i < hw;i++){
-                                grad_in[i + offset] = grad_out[i + offset] * gamma[cid] * var_inv;
+                                grad_in[i + offset] = (grad_out[i + offset] * hw_batch_size - sum_grad - sum_grad_gamma * xhat_cache[i + offset]) * coefficient;
                             }
                         }
 

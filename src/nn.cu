@@ -3,28 +3,28 @@
 namespace mytorch{
 
 namespace nn{
-    template <typename T>
+    template <typename T , size_t N>
     __device__ T warpReduceMax(T val) {
         #pragma unroll
-        for (int offset = 16; offset > 0; offset /= 2) {
+        for (int offset = N/2; offset > 0; offset /= 2) {
             val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
         }
         return val;
     }
 
-    template <typename T>
+    template <typename T , size_t N>
     __device__ T warpReduceSum(T val) {
         #pragma unroll
-        for (int offset = 16; offset > 0; offset /= 2) {
+        for (int offset = N/2; offset > 0; offset /= 2) {
             val += __shfl_down_sync(0xFFFFFFFF, val, offset);
         }
         return val;
     }
 
-    template __device__ float warpReduceMax<float>(float val);
-    template __device__ float warpReduceSum<float>(float val);
-     template __device__ double warpReduceMax<double>(double val);
-    template __device__ double warpReduceSum<double>(double val);
+    template __device__ float warpReduceMax<float,32>(float val);
+    template __device__ float warpReduceSum<float,32>(float val);
+     template __device__ double warpReduceMax<double,32>(double val);
+    template __device__ double warpReduceSum<double,32>(double val);
 
     __global__ void _softmax_kernel_small_512f(float * output , const float * input ,const int N, const int C){
         // for smaller than 512 size softmax
@@ -34,7 +34,7 @@ namespace nn{
         int warpId = tid / 32;
         int laneId = tid % 32;
 
-        int warpsPerBlock = blockDim.x / 32; // 512 / 32 = 16
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32; // 1024 / 32 = 32
 
         float * maxvals = shared;
         float * sumvals = &shared[warpsPerBlock];
@@ -46,13 +46,13 @@ namespace nn{
             maxvals[warpId] = maxval;
         }
         __syncthreads();
-        if(tid == 0){
-            maxval = maxvals[0];
-            for (int i = 1;i<warpsPerBlock;i++){
-                maxval = fmaxf(maxval , maxvals[i]);
+        if(tid < warpsPerBlock){
+            maxval = maxvals[tid];
+            maxval = warpReduceMax<float , warpsPerBlock>(maxval);
+            if(tid == 0){
+                maxvals[0] = maxval;    
             }
-            maxvals[0] = maxval;
-        } // get the block maximum
+        }
         maxval = maxvals[0];
         if(tid < C){
             float val = expf(x[tid] - maxval);
@@ -65,12 +65,12 @@ namespace nn{
             sumvals[warpId] = sum;
         }
         __syncthreads();
-        if(tid == 0){
-            float val = sumvals[0];
-            for (int i = 1;i<warpsPerBlock;i++){
-                val += sumvals[i];
+        if(tid < warpsPerBlock){
+            sum = sumvals[tid];
+            sum = warpReduceSum<float , warpsPerBlock>(sum);
+            if(tid == 0){
+                sumvals[0] = sum;
             }
-            sumvals[0] = val;
         } // get the block sum
         sum = sumvals[0];
         if(tid < C){
@@ -86,7 +86,7 @@ namespace nn{
         int warpId = tid / 32;
         int laneId = tid % 32;
 
-        int warpsPerBlock = blockDim.x / 32; // 512 / 32 = 16
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32; // 1024 / 32 = 32
 
         double * maxvals = sharedd;
         double * sumvals = &sharedd[warpsPerBlock];
@@ -98,12 +98,12 @@ namespace nn{
             maxvals[warpId] = maxval;
         }
         __syncthreads();
-        if(tid == 0){
-            maxval = maxvals[0];
-            for (int i = 1;i<warpsPerBlock;i++){
-                maxval = fmax(maxval , maxvals[i]);
+        if(tid < warpsPerBlock){
+            maxval = maxvals[tid];
+            maxval = warpReduceMax<double , warpsPerBlock>(maxval);
+            if(tid == 0){
+                maxvals[0] = maxval;    
             }
-            maxvals[0] = maxval;
         } // get the block maximum
         maxval = maxvals[0];
         if(tid < C){
@@ -116,12 +116,12 @@ namespace nn{
             sumvals[warpId] = sum;
         }
         __syncthreads();
-        if(tid == 0){
-            double val = sumvals[0];
-            for (int i = 1;i<warpsPerBlock;i++){
-                val += sumvals[i];
+        if(tid < warpsPerBlock){
+            sum = sumvals[tid];
+            sum = warpReduceSum<double , warpsPerBlock>(sum);
+            if(tid == 0){
+                sumvals[0] = sum;
             }
-            sumvals[0] = val;
         } // get the block sum
         sum = sumvals[0];
         if(tid < C){
@@ -136,7 +136,8 @@ namespace nn{
         int warpId = threadIdx.x / 32; 
         int laneId = threadIdx.x % 32;
 
-        int warpsPerBlock = blockDim.x / 32;
+
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
 
         float* maxvals = shared;
         float* sumvals = &shared[warpsPerBlock];
@@ -151,13 +152,13 @@ namespace nn{
         if (laneId == 0) 
             maxvals[warpId] = maxval;
         __syncthreads();
-        if (tid == 0) {
-            float val = maxvals[tid];
-            for (int i = 1; i < warpsPerBlock; i++) {
-                val = fmaxf(val, maxvals[i]);
+        if (tid < warpsPerBlock) {
+            maxval = maxvals[tid];
+            maxval = warpReduceMax<float , warpsPerBlock>(maxval);
+            if(tid == 0){
+                maxvals[0] = maxval;    
             }
             // store the final max in the first position
-            maxvals[0] = val;
         }
         __syncthreads();
         maxval = maxvals[0];
@@ -171,13 +172,14 @@ namespace nn{
         if( laneId == 0 ) 
             sumvals[warpId] = sum;
         __syncthreads();
-        if (tid == 0) {
-            float val = sumvals[0];
-            for (int i = 1; i < warpsPerBlock; i++) {
-                val += sumvals[i];
+        if (tid < warpsPerBlock) {
+            sum = sumvals[tid];
+            sum = warpReduceSum<float , warpsPerBlock>(sum);
+            if(tid == 0){
+                sumvals[0] = sum;
             }
-            sumvals[0] = val;
         }
+        __syncthreads();
         sum = sumvals[0];
         for (int i = tid; i < C; i += blockDim.x) {
             output[i + idx * C] /= sum;
@@ -192,7 +194,7 @@ namespace nn{
         int warpId = threadIdx.x / 32; 
         int laneId = threadIdx.x % 32;
 
-        int warpsPerBlock = blockDim.x / 32;
+        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
 
         double* maxvals = sharedd;
         double* sumvals = &sharedd[warpsPerBlock];
@@ -207,13 +209,13 @@ namespace nn{
         if (laneId == 0) 
             maxvals[warpId] = maxval;
         __syncthreads();
-        if (tid == 0) {
-            double val = maxvals[tid];
-            for (int i = 1; i < warpsPerBlock; i++) {
-                val = fmax(val, maxvals[i]);
+        if (tid < warpsPerBlock) {
+            maxval = maxvals[tid];
+            maxval = warpReduceMax<double , warpsPerBlock>(maxval);
+            if(tid == 0){
+                maxvals[0] = maxval;    
             }
             // store the final max in the first position
-            maxvals[0] = val;
         }
         __syncthreads();
         maxval = maxvals[0];
@@ -227,13 +229,14 @@ namespace nn{
         if( laneId == 0 ) 
             sumvals[warpId] = sum;
         __syncthreads();
-        if (tid == 0) {
-            double val = sumvals[0];
-            for (int i = 1; i < warpsPerBlock; i++) {
-                val += sumvals[i];
+        if (tid < warpsPerBlock) {
+            sum = sumvals[tid];
+            sum = warpReduceSum<double , warpsPerBlock>(sum);
+            if(tid == 0){
+                sumvals[0] = sum;
             }
-            sumvals[0] = val;
         }
+        __syncthreads();
         sum = sumvals[0];
         for (int i = tid; i < C; i += blockDim.x) {
             output[i + idx * C] /= sum;
@@ -634,7 +637,8 @@ namespace nn{
             extern __shared__ float smem_sum_f[];
             size_t warpId = ridx / 32;
             size_t laneId = ridx % 32;
-            size_t warpsPerBlock = blockDim.x / 32;
+
+            constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
             float sum = 0.0f;
             for(size_t i = ridx;i<reduce;i+=blockDim.x){
                 sum += input[oidx * reduce + i * inner + iidx];
@@ -642,12 +646,12 @@ namespace nn{
             sum = warpReduceSum<float>(sum);
             if(laneId == 0) smem_sum_f[warpId] = sum;
             __syncthreads();
-            if(ridx == 0){
-                float val = smem_sum_f[0];
-                for(size_t i = 1;i<warpsPerBlock;i++){
-                    val += smem_sum_f[i];
+            if(ridx < warpsPerBlock){
+                sum = smem_sum_f[ridx];
+                sum = warpReduceSum<float , warpsPerBlock>(sum);
+                if(ridx == 0){
+                    output[oidx * reduce + iidx] = sum;
                 }
-                output[oidx * reduce + iidx] = val;
             }
 
         }
@@ -658,7 +662,7 @@ namespace nn{
             extern __shared__ double smemd[];
             size_t warpId = ridx / 32;
             size_t laneId = ridx % 32;
-            size_t warpsPerBlock = blockDim.x / 32;
+            constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
             double sum = 0.0f;
             for(size_t i = ridx;i<reduce;i+=blockDim.x){
                 sum += input[oidx * reduce + i * inner + iidx];
@@ -666,12 +670,12 @@ namespace nn{
             sum = warpReduceSum<double>(sum);
             if(laneId == 0) smemd[warpId] = sum;
             __syncthreads();
-            if(ridx == 0){
-                double val = smemd[0];
-                for(size_t i = 1;i<warpsPerBlock;i++){
-                    val += smemd[i];
+            if(ridx < warpsPerBlock){
+                sum = smemd[ridx];
+                sum = warpReduceSum<double , warpsPerBlock>(sum);
+                if(ridx == 0){
+                    output[oidx * reduce + iidx] = sum;
                 }
-                output[oidx * reduce + iidx] = val;
             }
         }
 
