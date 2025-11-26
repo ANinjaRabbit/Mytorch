@@ -26,7 +26,7 @@ if __name__ == '__main__':
     mytorch.set_default_device(mytorch.Cuda)
 
     lenet = mytorch.nn.Sequential([
-        mytorch.nn.Conv2d(3, 6, 2),
+        mytorch.nn.Conv2d(3, 6, 5),
         mytorch.nn.BatchNorm2d(6),
         mytorch.nn.ReLU(),
         mytorch.nn.MaxPool2d([2, 2]),
@@ -35,20 +35,21 @@ if __name__ == '__main__':
         mytorch.nn.ReLU(),
         mytorch.nn.MaxPool2d([2, 2]),
         mytorch.nn.Flatten(start_dim = 1),
-        mytorch.nn.Linear(5 * 5 * 16, 120),
+        mytorch.nn.Linear(5 * 5 * 16, 240),
         mytorch.nn.ReLU(),
-        mytorch.nn.Linear(120, 84),
+        mytorch.nn.Linear(240, 84),
         mytorch.nn.ReLU(),
         mytorch.nn.Linear(84, 10),
     ])
 
 
     criterion = mytorch.nn.CrossEntropy()
-    optimizer = mytorch.optim.Adam(lenet.parameters() , lr = 0.01 , weight_decay=0.0001)
+    optimizer = mytorch.optim.Adam(lenet.parameters() , lr = 0.001 , weight_decay=0.0001)
 
     tensor_batches = []
     label_batches = []
     epochs = 100
+    scheduler = mytorch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs , eta_min=0.0001)
 
 
     for i, data in enumerate(trainloader, 0):
@@ -58,7 +59,6 @@ if __name__ == '__main__':
         tensor_batches.append(inputs)
         label_batches.append(labels)
 
-    scheduler = mytorch.optim.lr_scheduler.CosineAnnealingLR(optimizer , T_max = epochs , eta_min=0.001)
 
 
     for epoch in range(epochs):
@@ -68,11 +68,12 @@ if __name__ == '__main__':
             inputs.set_requires_grad(True)
             outputs = lenet(inputs)
             loss = criterion(outputs , labels)
-            loss.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            scheduler.step()
             running_loss+= loss.item()
+
+        scheduler.step()
         avg_loss = running_loss / len(tensor_batches)
         print(f'[{epoch + 1}] loss: {avg_loss:.3f}')
 

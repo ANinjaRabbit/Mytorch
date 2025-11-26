@@ -7,3 +7,4 @@ mnist-data/
 .vscode/
 __pycache__/
 test/data/
+data/

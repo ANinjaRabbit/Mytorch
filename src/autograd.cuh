@@ -51,6 +51,7 @@ namespace mytorch{
                 auto input_grads = grad_fn->backward(node_to_output_grads_dict[node]);
                 for(int i = 0 ; i < input_grads.size() ; i++){
                     if(node_to_output_grads_dict.find(inputs[i]) == node_to_output_grads_dict.end()){
+                        inputs[i].zero_grad();
                         node_to_output_grads_dict[inputs[i]] = make_view<T>(inputs[i].get_grad() , inputs[i].shape());
                     }
                     _add_inplace_kernel<<<CudaGetBlocks(inputs[i].size()) , kCudaThreadsNum >>>(
@@ -58,6 +59,32 @@ namespace mytorch{
                         input_grads[i].get() , 
                         inputs[i].size()
                     );
+                }
+            }
+
+
+        }
+        template <typename T>
+        void compute_gradients_of_variables_cpu(Tensor<T> & root ,const Tensor<T> & output_grad){
+            std::map<Tensor<T> , Tensor<T> , less_addr<T>> node_to_output_grads_dict;
+            node_to_output_grads_dict[root] = output_grad;
+            auto topo_order = find_topo_sort(root);
+            std::reverse(topo_order.begin() , topo_order.end());
+            for(auto & node : topo_order){
+                auto grad_fn = node.get_grad_fn();
+                if(grad_fn == nullptr){
+                    continue;
+                }
+                auto inputs = grad_fn->get_inputs();
+                auto input_grads = grad_fn->backward(node_to_output_grads_dict[node]);
+                for(int i = 0 ; i < input_grads.size() ; i++){
+                    if(node_to_output_grads_dict.find(inputs[i]) == node_to_output_grads_dict.end()){
+                        inputs[i].zero_grad();
+                        node_to_output_grads_dict[inputs[i]] = make_view<T>(inputs[i].get_grad() , inputs[i].shape());
+                    }
+                    for(int j = 0 ; j < inputs[i].size() ; j++){
+                        node_to_output_grads_dict[inputs[i]][j] += input_grads[i][j];
+                    }
                 }
             }
 

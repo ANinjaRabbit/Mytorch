@@ -590,6 +590,11 @@ namespace mytorch{
                     }
                 }
             }
+            void alloc_grad(){
+                if(grad_.is_null()){
+                    grad_ = cuda_shared_pointer<T>(this->size() , this->device() , false);
+                }
+            }
     };
     template <typename T>
     __global__ void __arange_kernel(T * output , const T start , const T step , const size_t n){
@@ -1065,12 +1070,12 @@ namespace mytorch{
                 }
                 data_ptr_->zero_grad();
 
-                auto grad_fn = get_grad_fn();
-                if(grad_fn){
-                    auto inputs = grad_fn->get_inputs();
-                    for(auto & input : inputs)
-                        input.zero_grad();
+            }
+            void alloc_grad(){
+                if(!data_ptr_){
+                    throw std::runtime_error("alloc_grad() on null tensor");
                 }
+                data_ptr_->alloc_grad();
             }
             friend Tensor<T> operator+(const T & a, const Tensor<T> & b){
                 Tensor<T> a_tensor(a , b.shape() , b.device());

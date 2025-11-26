@@ -150,7 +150,10 @@ void bind_module(py::module &m_mod) {
                 Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
                 return std::make_shared<Linear<T>>(in_features , out_features , device);
             }
-        ) , py::arg("in_features") , py::arg("out_features") , py::arg("device") = py::none());
+        ) , py::arg("in_features") , py::arg("out_features") , py::arg("device") = py::none())
+        .def_readwrite("weight" , &Linear<T>::weight)
+        .def_readwrite("bias" , &Linear<T>::bias)
+        ;
 
         py::class_<Conv2d<T>, Module<T>, std::shared_ptr<Conv2d<T>>>(m_mod, "Conv2d",
             "Convolutional layer using a learnable kernel.")
@@ -161,6 +164,8 @@ void bind_module(py::module &m_mod) {
             return std::make_shared<Conv2d<T>>(in_features , out_features , kernel_size , padding_mode , device);
         }
         ) , py::arg("in_features") , py::arg("out_features") , py::arg("kernel_size") , py::arg("padding_mode") = py::none() , py::arg("device") = py::none())
+        .def_readwrite("kernel" , &Conv2d<T>::kernel)
+        .def_readwrite("bias" , &Conv2d<T>::bias)
         ;
 
     
@@ -202,7 +207,15 @@ void bind_module(py::module &m_mod) {
             return std::make_shared<BatchNorm2d<T>>(num_features , momentum , device);
         }) , py::arg("num_features") , py::arg("momentum") = py::none() , py::arg("device") = py::none())
         .def("train" , &BatchNorm2d<T>::train , "Set the module to training mode.")
-        .def("eval" , &BatchNorm2d<T>::eval , "Set the module to evaluation mode.");
+        .def("eval" , &BatchNorm2d<T>::eval , "Set the module to evaluation mode.")
+        .def_readwrite("gamma" , &BatchNorm2d<T>::gamma)
+        .def_readwrite("beta" , &BatchNorm2d<T>::beta)
+        .def_readwrite("running_mean" , &BatchNorm2d<T>::running_mean)
+        .def_readwrite("running_var" , &BatchNorm2d<T>::running_var)
+        .def_readwrite("momentum" , &BatchNorm2d<T>::momentum)
+        .def_readwrite("epsilon" , &BatchNorm2d<T>::epsilon)
+        .def_readwrite("c" , &BatchNorm2d<T>::c);
+        
 
     py::class_<Sequential<T> , Module<T> , std::shared_ptr<Sequential<T>>>(m_mod, "Sequential",
         "Container for a sequence of modules.")
@@ -254,6 +267,7 @@ void bind_optim(py::module &m_optim) {
             py::arg("lr") = T(0.01),
             py::arg("weight_decay") = T(0.0),
             py::arg("device") = py::none())
+        .def("zero_grad" , &SGD<T>::zero_grad , "Zero the gradients of all parameters.")
         .def("step", &SGD<T>::step, "Perform one SGD update step.");
 
     // ---------------- Adam ----------------
@@ -291,6 +305,7 @@ void bind_optim(py::module &m_optim) {
             py::arg("eps") = T(1e-8),
             py::arg("weight_decay") = T(0),
             py::arg("device") = py::none())
+        .def("zero_grad" , &Adam<T>::zero_grad , "Zero the gradients of all parameters.")
         .def("step", &Adam<T>::step, "Perform one Adam update step.");
 
         auto m_lr = m_optim.def_submodule("lr_scheduler" , "Learning rate scheduler.");

@@ -8,30 +8,15 @@ using namespace mytorch;
 
 
 int main(){
-    DefaultDevice = Cuda;
+    DefaultDevice = Cpu;
+    nn::Conv2d<float> conv2d(2 , 2 , 3 , nn::NoPadding);
+    conv2d.kernel = ones<float>({2 , 2 , 3 , 3});
+    conv2d.bias = ones<float>({2});
+    auto x = ones<float>({2 , 2 , 5 , 5});
+    x.set_requires_grad(true);
+    auto out = conv2d(x);
+    std::cout << "out grad" << std::endl;
+    out.backward(arange<float>(0 , 2 * 2 * 3 * 3 , 1).reshape({2 , 2 , 3 , 3}));
+    x.get_grad_tensor().print();
 
-    // correctness test
-    auto conv1 = nn::Conv2d<float>(3 , 3 , 3 );
-    auto a = randn<float>({1 , 3 , 400 , 400});
-
-    float tot_time = 0;
-    cudaEvent_t start , stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    for(int i = 0;i < 100;i++){
-        std::cout << "Iteration " << i << " ";
-        cudaEventRecord(start);
-        try{
-            auto b = conv1(a);
-        } catch (const std::exception& e) {
-            std::cerr << "Exception: " << e.what() << std::endl;
-        }
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        float milliseconds = 0;
-        cudaEventElapsedTime(&milliseconds, start, stop);
-        tot_time += milliseconds;
-        std::cout << "Time: " << milliseconds << " ms\n";
-    }
-    printf("Time: %f ms\n", tot_time / 100);
 }

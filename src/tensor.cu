@@ -175,8 +175,12 @@ namespace mytorch{
         if(grad_out.is_null()){
             grad = ones<T>(this->shape() , this->device());
         }
-        grad.to(this->device());
-        autograd::compute_gradients_of_variables(*this , grad);
+        if(this->device() == Cuda){
+            autograd::compute_gradients_of_variables(*this , grad);
+        }
+        else{
+            autograd::compute_gradients_of_variables_cpu(*this , grad);
+        }
     }
     template <typename T>
     Tensor<T> Tensor<T>::sum(const size_t axis) const {

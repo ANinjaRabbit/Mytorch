@@ -3,28 +3,29 @@
 namespace mytorch{
 
 namespace nn{
-    template <typename T , size_t N>
+    template <typename T>
     __device__ T warpReduceMax(T val) {
+
         #pragma unroll
-        for (int offset = N/2; offset > 0; offset /= 2) {
+        for (int offset = 16; offset > 0; offset /= 2) {
             val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
         }
         return val;
     }
 
-    template <typename T , size_t N>
+    template <typename T>
     __device__ T warpReduceSum(T val) {
         #pragma unroll
-        for (int offset = N/2; offset > 0; offset /= 2) {
+        for (int offset = 16; offset > 0; offset /= 2) {
             val += __shfl_down_sync(0xFFFFFFFF, val, offset);
         }
         return val;
     }
 
-    template __device__ float warpReduceMax<float,32>(float val);
-    template __device__ float warpReduceSum<float,32>(float val);
-     template __device__ double warpReduceMax<double,32>(double val);
-    template __device__ double warpReduceSum<double,32>(double val);
+    template __device__ float warpReduceMax<float>(float val);
+    template __device__ float warpReduceSum<float>(float val);
+    template __device__ double warpReduceMax<double>(double val);
+    template __device__ double warpReduceSum<double>(double val);
 
     __global__ void _softmax_kernel_small_512f(float * output , const float * input ,const int N, const int C){
         // for smaller than 512 size softmax
@@ -34,7 +35,7 @@ namespace nn{
         int warpId = tid / 32;
         int laneId = tid % 32;
 
-        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32; // 1024 / 32 = 32
+        constexpr int warpsPerBlock = kCudaThreadsNum / 32; // 1024 / 32 = 32
 
         float * maxvals = shared;
         float * sumvals = &shared[warpsPerBlock];
@@ -48,15 +49,16 @@ namespace nn{
         __syncthreads();
         if(tid < warpsPerBlock){
             maxval = maxvals[tid];
-            maxval = warpReduceMax<float , warpsPerBlock>(maxval);
+            maxval = warpReduceMax<float >(maxval);
             if(tid == 0){
                 maxvals[0] = maxval;    
             }
         }
+        __syncthreads();
         maxval = maxvals[0];
         if(tid < C){
-            float val = expf(x[tid] - maxval);
-            output[tid + idx * C] = val == 0 ? 1e-8 : val; // compute exp(x - max)
+            float val = nn_exp_device<float>(x[tid] - maxval);
+            output[tid + idx * C] = val; // compute exp(x - max)
         }
         __syncthreads();
         float sum = tid < C ? output[tid + idx * C] : 0.0f;
@@ -67,11 +69,12 @@ namespace nn{
         __syncthreads();
         if(tid < warpsPerBlock){
             sum = sumvals[tid];
-            sum = warpReduceSum<float , warpsPerBlock>(sum);
+            sum = warpReduceSum<float>(sum);
             if(tid == 0){
-                sumvals[0] = sum;
+                sumvals[0] = sum < 1e-8 ? 1e-8 : sum;
             }
         } // get the block sum
+        __syncthreads();
         sum = sumvals[0];
         if(tid < C){
             output[tid + idx * C] /= sum; // normalize
@@ -86,7 +89,7 @@ namespace nn{
         int warpId = tid / 32;
         int laneId = tid % 32;
 
-        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32; // 1024 / 32 = 32
+        constexpr int warpsPerBlock = kCudaThreadsNum / 32; // 1024 / 32 = 32
 
         double * maxvals = sharedd;
         double * sumvals = &sharedd[warpsPerBlock];
@@ -100,14 +103,15 @@ namespace nn{
         __syncthreads();
         if(tid < warpsPerBlock){
             maxval = maxvals[tid];
-            maxval = warpReduceMax<double , warpsPerBlock>(maxval);
+            maxval = warpReduceMax<double>(maxval);
             if(tid == 0){
                 maxvals[0] = maxval;    
             }
         } // get the block maximum
+        __syncthreads();
         maxval = maxvals[0];
         if(tid < C){
-            output[tid + idx * C] = exp(x[tid] - maxval); // compute exp(x - max)
+            output[tid + idx * C] = nn_exp_device<double>(x[tid] - maxval); // compute exp(x - max)
         }
         __syncthreads();
         double sum = tid < C ? output[tid + idx * C] : 0.0;
@@ -118,11 +122,12 @@ namespace nn{
         __syncthreads();
         if(tid < warpsPerBlock){
             sum = sumvals[tid];
-            sum = warpReduceSum<double , warpsPerBlock>(sum);
+            sum = warpReduceSum<double>(sum);
             if(tid == 0){
                 sumvals[0] = sum;
             }
         } // get the block sum
+        __syncthreads();
         sum = sumvals[0];
         if(tid < C){
             output[tid + idx * C] /= sum; // normalize
@@ -137,7 +142,7 @@ namespace nn{
         int laneId = threadIdx.x % 32;
 
 
-        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
+        constexpr int warpsPerBlock = kCudaThreadsNum / 32;
 
         float* maxvals = shared;
         float* sumvals = &shared[warpsPerBlock];
@@ -154,7 +159,7 @@ namespace nn{
         __syncthreads();
         if (tid < warpsPerBlock) {
             maxval = maxvals[tid];
-            maxval = warpReduceMax<float , warpsPerBlock>(maxval);
+            maxval = warpReduceMax<float>(maxval);
             if(tid == 0){
                 maxvals[0] = maxval;    
             }
@@ -164,7 +169,7 @@ namespace nn{
         maxval = maxvals[0];
         float sum = 0.0f;
         for (int i = tid; i < C; i += blockDim.x) {
-            output[i + idx * C] = expf(x[i] - maxval);
+            output[i + idx * C] = nn_exp_device<float>(x[i] - maxval);
             sum += output[i + idx * C];
         }   
         __syncthreads();
@@ -174,7 +179,7 @@ namespace nn{
         __syncthreads();
         if (tid < warpsPerBlock) {
             sum = sumvals[tid];
-            sum = warpReduceSum<float , warpsPerBlock>(sum);
+            sum = warpReduceSum<float>(sum);
             if(tid == 0){
                 sumvals[0] = sum;
             }
@@ -194,7 +199,7 @@ namespace nn{
         int warpId = threadIdx.x / 32; 
         int laneId = threadIdx.x % 32;
 
-        constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
+        constexpr int warpsPerBlock = kCudaThreadsNum / 32;
 
         double* maxvals = sharedd;
         double* sumvals = &sharedd[warpsPerBlock];
@@ -211,7 +216,7 @@ namespace nn{
         __syncthreads();
         if (tid < warpsPerBlock) {
             maxval = maxvals[tid];
-            maxval = warpReduceMax<double , warpsPerBlock>(maxval);
+            maxval = warpReduceMax<double>(maxval);
             if(tid == 0){
                 maxvals[0] = maxval;    
             }
@@ -221,7 +226,7 @@ namespace nn{
         maxval = maxvals[0];
         double sum = 0.0f;
         for (int i = tid; i < C; i += blockDim.x) {
-            output[i + idx * C] = exp(x[i] - maxval);
+            output[i + idx * C] = nn_exp_device<double>(x[i] - maxval);
             sum += output[i + idx * C];
         }   
         __syncthreads();
@@ -231,7 +236,7 @@ namespace nn{
         __syncthreads();
         if (tid < warpsPerBlock) {
             sum = sumvals[tid];
-            sum = warpReduceSum<double , warpsPerBlock>(sum);
+            sum = warpReduceSum<double>(sum);
             if(tid == 0){
                 sumvals[0] = sum;
             }
@@ -257,7 +262,6 @@ namespace nn{
             size_t m0 , m1;
             m0 = iy - (kh >> 1);
             m1 = ix - (kw >> 1);
-            size_t grid_offset =  0;
             size_t col_offset;
             if constexpr (trans){
                 col_offset = index;
@@ -276,7 +280,6 @@ namespace nn{
                         is_valid = k0 < h && k1 < w;
                         size_t im_offset = k0 * w + k1;
                         col[col_offset] =  is_valid ? im[im_offset + coffset] : 0;
-                        grid_offset++;
                         if constexpr (trans){
                             col_offset += hw;
                         }
@@ -313,7 +316,6 @@ namespace nn{
             m0 = index / reduce_w;
 
 
-            size_t grid_offset =  0;
             size_t col_offset;
             if constexpr (trans){
                 col_offset = index;
@@ -329,7 +331,6 @@ namespace nn{
                         size_t iy = m1 + g1;
                         size_t im_offset = ix * w + iy;
                         col[col_offset] =  im[im_offset + coffset];
-                        grid_offset++;
                         if constexpr (trans){
                             col_offset += rhw;
                         }
@@ -367,7 +368,6 @@ namespace nn{
             size_t m0 , m1;
             m0 = iy - (kh >> 1);
             m1 = ix - (kw >> 1);
-            size_t grid_offset =  0;
             size_t col_offset;
             col_offset = index * kernel_size;
             size_t grid_index0 , grid_index1 , hw = h * w;
@@ -384,7 +384,6 @@ namespace nn{
                             atomicAdd( im + im_offset + coffset , col[col_offset]);
                         }
 
-                        grid_offset++;
                         col_offset++;
                     }
                 }
@@ -410,7 +409,6 @@ namespace nn{
             m1 = index % reduce_imshape;
             m0 = index / reduce_imshape;
 
-            size_t grid_offset =  0;
             size_t col_offset;
             col_offset = index * kernel_size;
             size_t hw = h * w;
@@ -421,7 +419,6 @@ namespace nn{
                         size_t iy = m1 + g1;
                         size_t im_offset = ix * w + iy;
                         atomicAdd(im + im_offset + coffset , col[col_offset]);
-                        grid_offset++;
                         col_offset++;
                     } 
                 }
@@ -449,7 +446,6 @@ namespace nn{
             for(int i = 0;i<ndim;i++){
                 grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
             }
-            size_t grid_offset =  0;
             size_t col_offset;
             if constexpr (trans){
                 col_offset = index;
@@ -476,7 +472,6 @@ namespace nn{
                     }
                     col[col_offset] =  is_valid ? im[im_offset + coffset] : 0;
                     grid_index.next();
-                    grid_offset++;
                     if constexpr (trans){
                         col_offset += hw;
                     }
@@ -505,7 +500,6 @@ namespace nn{
                 index_ /= reduce_imshape;
             }
 
-            size_t grid_offset =  0;
             size_t col_offset;
             if constexpr (trans){
                 col_offset = index;
@@ -528,7 +522,6 @@ namespace nn{
                     }
                     col[col_offset] =  im[im_offset];
                     grid_index.next();
-                    grid_offset++;
                     if constexpr (trans){
                         col_offset += rhw;
                     }
@@ -556,7 +549,6 @@ namespace nn{
             for(int i = 0;i<ndim;i++){
                 grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
             }
-            size_t grid_offset =  0;
             size_t col_offset = index * kernel_size;
             for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
                 CudaMultiDimIndex grid_index(kernel_shape , ndim);
@@ -579,7 +571,6 @@ namespace nn{
                         atomicAdd( &im[im_offset + coffset] , col[col_offset] );
                     }
                     grid_index.next();
-                    grid_offset++;
                     col_offset++;
 
                 }while(!grid_index.is_zero());
@@ -601,7 +592,6 @@ namespace nn{
                 index_ /= reduce_imshape;
             }
 
-            size_t grid_offset =  0;
             size_t col_offset = index * kernel_size;
             for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
                 size_t kernel_index[kCudaMultiDimMax];
@@ -617,7 +607,6 @@ namespace nn{
                     }
                     atomicAdd( &im[im_offset + coffset] , col[col_offset] );
                     grid_index.next();
-                    grid_offset++;
                     col_offset++;
 
                 }while(!grid_index.is_zero());
@@ -638,19 +627,20 @@ namespace nn{
             size_t warpId = ridx / 32;
             size_t laneId = ridx % 32;
 
-            constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
+            constexpr int warpsPerBlock = kCudaThreadsNum / 32;
             float sum = 0.0f;
+            size_t ri = reduce * oidx * inner + iidx;
             for(size_t i = ridx;i<reduce;i+=blockDim.x){
-                sum += input[oidx * reduce + i * inner + iidx];
+                sum += input[ri + i * inner];
             }
             sum = warpReduceSum<float>(sum);
             if(laneId == 0) smem_sum_f[warpId] = sum;
             __syncthreads();
             if(ridx < warpsPerBlock){
                 sum = smem_sum_f[ridx];
-                sum = warpReduceSum<float , warpsPerBlock>(sum);
+                sum = warpReduceSum<float>(sum);
                 if(ridx == 0){
-                    output[oidx * reduce + iidx] = sum;
+                    output[oidx * inner + iidx] = sum;
                 }
             }
 
@@ -659,25 +649,28 @@ namespace nn{
             size_t ridx = threadIdx.x;
             size_t iidx = blockIdx.x % inner;
             size_t oidx = blockIdx.x / inner;
-            extern __shared__ double smemd[];
+            extern __shared__ double smem_sum_d[];
             size_t warpId = ridx / 32;
             size_t laneId = ridx % 32;
-            constexpr size_t warpsPerBlock = kCudaThreadsNum / 32;
+
+            constexpr int warpsPerBlock = kCudaThreadsNum / 32;
             double sum = 0.0f;
+            size_t ri = reduce * oidx * inner + iidx;
             for(size_t i = ridx;i<reduce;i+=blockDim.x){
-                sum += input[oidx * reduce + i * inner + iidx];
+                sum += input[ri + i * inner];
             }
             sum = warpReduceSum<double>(sum);
-            if(laneId == 0) smemd[warpId] = sum;
+            if(laneId == 0) smem_sum_d[warpId] = sum;
             __syncthreads();
             if(ridx < warpsPerBlock){
-                sum = smemd[ridx];
-                sum = warpReduceSum<double , warpsPerBlock>(sum);
+                sum = smem_sum_d[ridx];
+                sum = warpReduceSum<double>(sum);
                 if(ridx == 0){
-                    output[oidx * reduce + iidx] = sum;
+                    output[oidx * inner + iidx] = sum;
                 }
             }
         }
+
 
     }
 

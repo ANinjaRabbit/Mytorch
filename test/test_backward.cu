@@ -6,7 +6,7 @@ using namespace mytorch;
 int main(){
     Device device = Cuda;
     DefaultDevice = device;
-    nn::Conv2d<float> conv(2 , 2, 3,nn::NoPadding);
+    nn::Conv2d<float> conv(1 , 2, 3,nn::NoPadding);
     auto kernel = conv.parameters()[0];
     auto bias = conv.parameters()[1];
     auto x = rand<float>({ 1 ,2 , 4 ,4} , device);
@@ -23,11 +23,12 @@ int main(){
     auto l = loss.sum(0);
     l.zero_grad();
     l.backward();
+    auto tensor_check = x;
     bias.get_grad_tensor().print();
     l.to(Cpu);
-    bias.to(Cpu);
+    tensor_check.to(Cpu);
+    Tensor<float> grad_ans(tensor_check.shape() , Cpu);
     for(int i = 0;i<2;i++){
-        std::cout << "now " << i << " "  << std::endl;
         float epsilon = 0.001;
         bias[i] += epsilon;
         bias.to(Cuda);
@@ -40,6 +41,7 @@ int main(){
 
         bias.to(Cpu);
         bias[i] -= epsilon;
-        std::cout << "grad check " << i << " " << grad  << std::endl;
+        grad_ans[i] = grad;
     }
+    grad_ans.print();
 }
