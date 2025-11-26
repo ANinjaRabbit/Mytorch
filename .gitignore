@@ -8,3 +8,4 @@ mnist-data/
 __pycache__/
 test/data/
 data/
+runs/
