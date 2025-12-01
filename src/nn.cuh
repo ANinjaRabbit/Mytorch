@@ -1815,10 +1815,6 @@ namespace nn{
                             ));
                         }
                         cublasSetStream(handle , stream_add);
-
-                        
-
-
                         _linear_add<T><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum , 0 , stream_add>>>(
                             gradbiasget , 
                             gradoutget + gradoutoffset , 
@@ -1929,7 +1925,7 @@ namespace nn{
         const int stride_h , const int stride_w,
         const int height_col , const int width_col
     );
-    template <typename T> // non transpose mode
+    template <typename T , bool trans = false> // non transpose mode
     __global__ void col2im_gpu_2d(T * im , T * col , const int n, // n for im
         const int channels , const int height , const int width,
         const int kh , const int kw , const int pad_h , const int pad_w,
@@ -2001,15 +1997,15 @@ namespace nn{
         }
     }
 
-    template <typename T> // non transpose mode
+    template <typename T , bool trans = false> // non transpose mode
     void col2im_2d(T * im , T * col , const int n, // n for im
         const int channels , const int height , const int width,
         const int kh , const int kw , const int pad_h , const int pad_w,
         const int stride_h , const int stride_w,
-        const int height_col , const int width_col , const Device device
+        const int height_col , const int width_col , const Device device , cudaStream_t stream = 0
     ){
         if(device == Cuda){
-            col2im_gpu_2d<T><<<CudaGetBlocks(n) , kCudaThreadsNum>>>(
+            col2im_gpu_2d<T , trans><<<CudaGetBlocks(n) , kCudaThreadsNum , 0 , stream>>>(
                 im , col , n , channels , height ,  width , 
                 kh , kw , pad_h , pad_w , 
                 stride_h , stride_w , 
@@ -2017,6 +2013,7 @@ namespace nn{
             );
         }
         else{
+        if constexpr(!trans){
             const int ckernelsize = kh * kw * channels; // size of whole kernel
             int index = 0;
             for(int c_im = 0; c_im < channels;c_im++){
@@ -2039,8 +2036,6 @@ namespace nn{
 
                                 int col_index = (h_col * width_col + w_col) * ckernelsize + (c_im * kh   +   h_k) * kw + w_k;
                                 val += col[col_index];
-                                // set col to 0 after use
-                                col[col_index] = 0;
                             }
                         }
                         im[index] = val;
@@ -2049,6 +2044,41 @@ namespace nn{
                     }
                 }
             }
+
+        }
+        else{
+            const int ckernelsize = kh * kw * channels; // size of whole kernel
+            int index = 0;
+            for(int c_im = 0; c_im < channels;c_im++){
+                for(int h_im_ = 0 ; h_im_ < height; h_im_++){
+                    for(int w_im_ = 0; w_im_ < width; w_im_++){
+
+                        T val = 0;
+                        const int w_im = w_im_ + pad_w;
+                        const int h_im = h_im_ + pad_h;
+
+                        const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                        const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                        const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                        const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+                        for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                            for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                                int w_k = w_im - w_col * stride_w;
+                                int h_k = h_im - h_col * stride_h;
+
+                                int col_index = (((c_im * kh + h_k) * kw + w_k) * height_col + h_col) * width_col + w_col;
+                                val += col[col_index];
+                            }
+                        }
+                        im[index] = val;
+                        index++;
+
+                    }
+                }
+            }
+
+        }
             
         }
     }
@@ -2179,52 +2209,47 @@ namespace nn{
                 const int resultsize = result.size();
 
                 if(device == Cuda){
-                    if(buf_size < resultcoutstep * ckernelsize){
+                    if(buf_size < resultcoutstep * ckernelsize * b ){
                         if(buf){
                             CHECK(cudaFree(buf));
                         }
-                        buf_size = resultcoutstep * ckernelsize;
+                        buf_size = resultcoutstep * ckernelsize * b;
                         CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
                     }
                     _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
                         resultget , bias.get() , resultsize , resultcoutstep , out_channels
                     );
-                    for(int inputbatchoffset = 0 , resultbatchoffset = 0
+                    for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0
                         ; resultbatchoffset < resultsize
-                        ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-
-
-                        im2col_2d<T , false>(buf , inputget + inputbatchoffset,
+                        ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
+                        im2col_2d<T , false>(buf + i * resultcoutstep * ckernelsize, inputget + inputbatchoffset,
                             n, in_channels, h , w,
                             kh , kw , pad_h , pad_w , stride_h , stride_w,
                             height_col , width_col,device
                         );
-
-
-
-                        
-
-                        CHECK_CUBLAS(
-                            cublasSgemvStridedBatched(
-                                handle,
-                                CUBLAS_OP_T,
-                                ckernelsize,
-                                resultcoutstep,
-                                &alpha1,
-                                buf,
-                                ckernelsize,
-                                0,
-                                kernelget,
-                                1,
-                                ckernelsize,
-                                &beta1,
-                                resultget + resultbatchoffset,
-                                1,
-                                resultcoutstep,
-                                out_channels
-                            )
-                        );
                     }
+                    CHECK_CUBLAS(
+                        cublasSgemmStridedBatched(
+                            handle,
+                            CUBLAS_OP_T,
+                            CUBLAS_OP_N,
+                            resultcoutstep,
+                            out_channels,
+                            ckernelsize,
+                            &alpha1,
+                            buf,
+                            ckernelsize,
+                            ckernelsize * resultcoutstep,
+                            kernelget,
+                            ckernelsize,
+                            0,
+                            &beta1,
+                            resultget,
+                            resultcoutstep,
+                            resultcoutstep * out_channels,
+                            b
+                        )
+                    );
                 }
                 else{
                     if(buf_size < resultcoutstep * ckernelsize){
@@ -2284,7 +2309,7 @@ namespace nn{
                 const int height_col = grad_out.shape()[2];
                 const int width_col = grad_out.shape()[3];
                 
-                T alpha1 = 1.0 , beta1 = 1.0;
+                T alpha1 = 1.0 , beta1 = 1.0 , beta0 = 0.0;
 
                 int resultcoutstep = height_col * width_col;
                 int resultbatchstep = resultcoutstep * out_channels , inputbatchstep = h * w * in_channels;
@@ -2309,60 +2334,52 @@ namespace nn{
                 if(device == Cuda){
                     if(is_1x1_){
                         // no need to im2col
-                        for(int inputbatchoffset = 0 , resultbatchoffset = 0;
+                        for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
                                 resultbatchoffset < gradoutsize;
-                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
                             CHECK_CUBLAS(
-                                cublasSgemvStridedBatched(handle,
+                                cublasSgemm_v2(
+                                    handle,
                                     CUBLAS_OP_T,
-                                    resultcoutstep,
+                                    CUBLAS_OP_N,
                                     ckernelsize,
-                                    &alpha1,
-                                    inputget + inputbatchoffset,
+                                    out_channels,
                                     resultcoutstep,
-                                    0,
+                                    &alpha1,
+                                    inputget + i * ckernelsize * resultcoutstep,
+                                    resultcoutstep,
                                     gradoutget + resultbatchoffset,
-                                    1,
                                     resultcoutstep,
                                     &beta1,
                                     gradkernelget,
-                                    1,
-                                    ckernelsize,
-                                    out_channels
+                                    ckernelsize
                                 )
                             );
+
                         }
 
                     }
                     else{
-                        for(int inputbatchoffset = 0 , resultbatchoffset = 0;
+                        for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
                                 resultbatchoffset < gradoutsize;
-                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-
-                            im2col_2d<T , false>(buf , inputget + inputbatchoffset, im2col_n,
-                                in_channels , h , w , 
-                                kh , kw , pad_h , pad_w , 
-                                stride_h , stride_w , height_col , width_col, device
-                            );
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
 
                             CHECK_CUBLAS(
-                                cublasSgemvStridedBatched(handle,
+                                cublasSgemm_v2(
+                                    handle,
+                                    CUBLAS_OP_N,
                                     CUBLAS_OP_N,
                                     ckernelsize,
+                                    out_channels,
                                     resultcoutstep,
                                     &alpha1,
-                                    buf,
+                                    buf + i * ckernelsize * resultcoutstep,
                                     ckernelsize,
-                                    0,
                                     gradoutget + resultbatchoffset,
-                                    1,
                                     resultcoutstep,
                                     &beta1,
                                     gradkernelget,
-                                    1,
-                                    ckernelsize,
-                                    out_channels
+                                    ckernelsize
                                 )
                             );
                         }
@@ -2420,59 +2437,61 @@ namespace nn{
                 }
                 if(device == Cuda){
                     if(is_1x1_){
-                        for(int inputbatchoffset = 0 , resultbatchoffset = 0;
-                            resultbatchoffset < gradoutsize;
-                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-                            for(int kernelcoutoffset = 0, resultcoutoffset = 0;
-                                kernelcoutoffset < kernel.size();
-                                kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
-                                
-                                CHECK_CUBLAS(
-                                    cublasSger_v2(
-                                        handle,
-                                        ckernelsize,
-                                        resultcoutstep,
-                                        &alpha1,
-                                        kernelget + kernelcoutoffset,
-                                        1,
-                                        gradoutget + resultbatchoffset + resultcoutoffset,
-                                        1,
-                                        gradinget + inputbatchoffset,
-                                        ckernelsize
-                                    )
-                                );
-                            }
-                        }
+                        CHECK_CUBLAS(
+                            cublasSgemmStridedBatched(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_T,
+                                resultcoutstep,
+                                ckernelsize,
+                                out_channels,
+                                &alpha1,
+                                gradoutget,
+                                resultcoutstep,
+                                resultcoutstep * out_channels,
+                                kernelget,
+                                ckernelsize,
+                                0,
+                                &beta0,
+                                gradinget,
+                                resultcoutstep,
+                                resultcoutstep * ckernelsize,
+                                b
+                            )
+                        );
 
                     }
                     else{
-                        CHECK(cudaMemset(buf , 0 , buf_size * sizeof(T)));
-                        for(int inputbatchoffset = 0 , resultbatchoffset = 0;
+
+                        CHECK_CUBLAS(
+                            cublasSgemmStridedBatched(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_T,
+                                ckernelsize,
+                                resultcoutstep,
+                                out_channels,
+                                &alpha1,
+                                kernelget,
+                                ckernelsize,
+                                0,
+                                gradoutget,
+                                resultcoutstep,
+                                resultcoutstep * out_channels,
+                                &beta0,
+                                buf,
+                                ckernelsize,
+                                ckernelsize * resultcoutstep,
+                                b
+                            )
+                        );
+                        for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
                             resultbatchoffset < gradoutsize;
-                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-                            for(int kernelcoutoffset = 0, resultcoutoffset = 0;
-                                kernelcoutoffset < kernel.size();
-                                kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
-                                
-                                CHECK_CUBLAS(
-                                    cublasSger_v2(
-                                        handle,
-                                        ckernelsize,
-                                        resultcoutstep,
-                                        &alpha1,
-                                        kernelget + kernelcoutoffset,
-                                        1,
-                                        gradoutget + resultbatchoffset + resultcoutoffset,
-                                        1,
-                                        buf,
-                                        ckernelsize
-                                    )
-                                );
-                            }
-                            col2im_2d<T>(gradinget + inputbatchoffset , buf , col2im_n,
+                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
+                            
+                            col2im_2d<T,false>(gradinget + inputbatchoffset , buf + i * ckernelsize * resultcoutstep , col2im_n,
                                 in_channels , h , w , kh , kw , 
                                 pad_h , pad_w , stride_h , stride_w , height_col , width_col , device);
-                            
 
                         }
 
@@ -2505,7 +2524,7 @@ namespace nn{
                             }
                         }
 
-                        col2im_2d<T>(gradinget + inputbatchoffset , buf , col2im_n,
+                        col2im_2d<T,false>(gradinget + inputbatchoffset , buf , col2im_n,
                             in_channels , h , w , kh , kw , 
                             pad_h , pad_w , stride_h , stride_w , height_col , width_col , device);
                     }

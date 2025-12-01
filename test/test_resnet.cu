@@ -22,8 +22,8 @@ int main(){
     cudaEventCreate(&stop);
     for(int i = 0 ; i < 1000 ; i++){
         std::cout << "Iteration " << i << " ";
-        cudaEventRecord(start);
         optimizer->zero_grad();
+        cudaEventRecord(start);
         auto y_pred = model(X);
         auto loss = criterion({y_pred , y});
         loss.backward();

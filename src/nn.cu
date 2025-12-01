@@ -340,49 +340,89 @@ namespace nn{
 
 
 
-    template <typename T> // non transpose mode
+    template <typename T , bool transpose> // non transpose mode
     __global__ void col2im_gpu_2d(T * im , T * col , const int n, // n for im
         const int channels , const int height , const int width,
         const int kh , const int kw , const int pad_h , const int pad_w,
         const int stride_h , const int stride_w,
         const int height_col , const int width_col
     ){
-        CUDA_KERNEL_LOOP(index , n){ // n for im
-            T val = 0;
-            const int w_im = index % width + pad_w;
-            const int h_im = (index / width) % height + pad_h;
-            const int c_im = index / (height * width);
-            const int ckernelsize = kh * kw * channels; // size of whole kernel
+        if constexpr (!transpose){
+            CUDA_KERNEL_LOOP(index , n){ // n for im
+                T val = 0;
+                const int w_im = index % width + pad_w;
+                const int h_im = (index / width) % height + pad_h;
+                const int c_im = index / (height * width);
+                const int ckernelsize = kh * kw * channels; // size of whole kernel
 
-            const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
-            const int w_col_end = min(w_im / stride_w + 1 , width_col);
-            const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
-            const int h_col_end = min(h_im / stride_h + 1 , height_col);
+                const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                const int h_col_end = min(h_im / stride_h + 1 , height_col);
 
-            for(int h_col = h_col_start; h_col < h_col_end; h_col++){
-                for(int w_col = w_col_start; w_col < w_col_end; w_col++){
-                    int w_k = w_im - w_col * stride_w;
-                    int h_k = h_im - h_col * stride_h;
+                for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                    for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                        int w_k = w_im - w_col * stride_w;
+                        int h_k = h_im - h_col * stride_h;
 
-                    int col_index = (h_col * width_col + w_col) * ckernelsize + (c_im * kh   +   h_k) * kw + w_k;
-                    val += col[col_index];
-                    // set col to 0 after use
-                    col[col_index] = 0;
+                        int col_index = (h_col * width_col + w_col) * ckernelsize + (c_im * kh   +   h_k) * kw + w_k;
+                        val += col[col_index];
+                    }
                 }
+                im[index] = val;
             }
-            im[index] = val;
+        }
+        else{
+            CUDA_KERNEL_LOOP(index , n){ // n for im
+                T val = 0;
+                const int w_im = index % width + pad_w;
+                const int h_im = (index / width) % height + pad_h;
+                const int c_im = index / (height * width);
+
+                const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+                for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                    for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                        int w_k = w_im - w_col * stride_w;
+                        int h_k = h_im - h_col * stride_h;
+
+                        int col_index = (((c_im * kh + h_k) * kw + w_k) *
+                                height_col + h_col) * width_col + w_col;
+                        val += col[col_index];
+                    }
+                }
+                im[index] = val;
+            }
+
         }
     }
 
     template
-    __global__ void col2im_gpu_2d<float>(float * im , float * col , const int n, // n for im
+    __global__ void col2im_gpu_2d<float,true>(float * im , float * col , const int n, // n for im
         const int channels , const int height , const int width,
         const int kh , const int kw , const int pad_h , const int pad_w,
         const int stride_h , const int stride_w,
         const int height_col , const int width_col
     );
     template
-    __global__ void col2im_gpu_2d<double>(double * im , double * col , const int n, // n for im
+    __global__ void col2im_gpu_2d<float,false>(float * im , float * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
+    template
+    __global__ void col2im_gpu_2d<double , true>(double * im , double * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
+    template
+    __global__ void col2im_gpu_2d<double , false>(double * im , double * col , const int n, // n for im
         const int channels , const int height , const int width,
         const int kh , const int kw , const int pad_h , const int pad_w,
         const int stride_h , const int stride_w,
