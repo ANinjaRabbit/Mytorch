@@ -22,12 +22,27 @@ namespace nn{
     }
 
     template <typename T>
+    __device__ inline T nn_device_rsqrt(T x){
+        return rsqrt(x);
+    }
+    template <> 
+    __device__ inline float nn_device_rsqrt(float x){
+        return __frsqrt_rn(x);
+    }
+
+
+    template <typename T>
     __device__ __host__ inline T nn_sqrt(T x){
         return sqrt(x);
     }
     template <> 
     __device__ __host__ inline float nn_sqrt(float x){
         return sqrtf(x);
+    }
+
+    template <typename T>
+    __device__ inline T nn_device_sqrt(T x){
+        return __fsqrt_rn(x);
     }
 
     template <typename T>
@@ -48,14 +63,7 @@ namespace nn{
     }
 
 
-    // initialization
 
-    template __device__ __host__ float nn_rsqrt<float>(float x);
-    template __device__ __host__ double nn_rsqrt<double>(double x);
-    template __device__ __host__ float nn_sqrt<float>(float x);
-    template __device__ __host__ double nn_sqrt<double>(double x);
-    template __device__ __host__ float nn_exp<float>(float x);
-    template __device__ __host__ double nn_exp<double>(double x);
 
 
     template <typename T>
@@ -1583,18 +1591,27 @@ namespace nn{
 
         }
     }
+
     template <typename T>
-    __global__ void _linear_add(T * output , const T * input , int size){
+    __global__ void _linear_bias_kernel(T * result , const T * bias , int size , int stride){
         int index = threadIdx.x + blockDim.x * blockIdx.x;
         if(index < size){
-            output[index] += input[index];
+            result[index] = bias[index % stride];
+        }
+    }
+    template <typename T>
+    __global__ void _linear_add_input_stride(T * output , const T * input , int size , int inputstride , int batchsize){
+        int index = threadIdx.x + blockDim.x * blockIdx.x;
+        if(index < size){
+            for(int b = 0;b < batchsize;b++){
+                output[index] += input[index + b * inputstride];
+            }
         }
     }
     template <typename T>
     class Linear : public Module<T>{
         private:
             Tensor<T> input_cache; // internal backward
-            cudaStream_t stream_gemm,stream_add;
             cublasHandle_t handle;
             cudaStream_t streams[kStreamCount];
             Tensor<T> weight_t;
@@ -1618,8 +1635,6 @@ namespace nn{
                 }
                 if(weight.device() == Cuda){
                     cublasCreate(&handle);
-                    CHECK(cudaStreamCreate(&stream_gemm));
-                    CHECK(cudaStreamCreate(&stream_add));
                     for(int i = 0;i<kStreamCount;i++){
                         CHECK(cudaStreamCreate(&streams[i]));
                     }
@@ -1632,8 +1647,6 @@ namespace nn{
                 bias = rand<T>({out_features} , device) * 2 * inv - inv;
                 if(device == Cuda){
                     cublasCreate(&handle);
-                    CHECK(cudaStreamCreate(&stream_gemm));
-                    CHECK(cudaStreamCreate(&stream_add));
                     for(int i = 0;i<kStreamCount;i++){
                         CHECK(cudaStreamCreate(&streams[i]));
                     }
@@ -1642,8 +1655,6 @@ namespace nn{
             ~Linear(){
                 if(weight.device() == Cuda){
                     cublasDestroy(handle);
-                    CHECK(cudaStreamDestroy(stream_gemm));
-                    CHECK(cudaStreamDestroy(stream_add));
                     for(int i = 0;i<kStreamCount;i++){
                         CHECK(cudaStreamDestroy(streams[i]));
                     }
@@ -1686,50 +1697,51 @@ namespace nn{
 
                 if(result.device() == Cuda){
                     T alpha = 1.0f;
-                    T beta0 = 1.0f;
+                    T beta = 1.0f;
                     __cudaMemcpyBatch(resultget , bias.get() , stepresult , result.size() / stepresult , streams);
+
 
                     auto batch_size = result.size() / stepresult;
 
                     if constexpr (std::is_same_v<T , float>){
-                        CHECK_CUBLAS(cublasSgemvStridedBatched(
-                            handle,
-                            CUBLAS_OP_N,
-                            resultshape[resultshape.size() - 1],
-                            input0shape[input0shape.size() - 1],
-                            &alpha,
-                            weight_t.get(),
-                            weight_t.shape().back(),
-                            0,
-                            inputget,
-                            1,
-                            step1,
-                            &beta0,
-                            resultget,
-                            1,
-                            stepresult,
-                            batch_size
-                        ));
+                        CHECK_CUBLAS(
+                            cublasSgemm_v2(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_N,
+                                resultshape.back(),
+                                batch_size,
+                                input0shape.back(),
+                                &alpha,
+                                weight_t.get(),
+                                resultshape.back(),
+                                inputget,
+                                input0shape.back(),
+                                &beta,
+                                resultget,
+                                resultshape.back()
+                            )
+                        );
                     }
                     else if constexpr (std::is_same_v<T , double>){
-                        CHECK_CUBLAS(cublasDgemvStridedBatched(
-                            handle,
-                            CUBLAS_OP_N,
-                            resultshape[resultshape.size() - 1],
-                            input0shape[input0shape.size() - 1],
-                            &alpha,
-                            weight_t.get(),
-                            weight_t.shape().back(),
-                            0,
-                            inputget,
-                            1,
-                            step1,
-                            &beta,
-                            resultget,
-                            1,
-                            stepresult,
-                            batch_size
-                        ));
+                        CHECK_CUBLAS(
+                            cublasSgemm_v2(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_N,
+                                resultshape.back(),
+                                batch_size,
+                                input0shape.back(),
+                                &alpha,
+                                weight_t.get(),
+                                resultshape.back(),
+                                inputget,
+                                input0shape.back(),
+                                &beta,
+                                resultget,
+                                resultshape.back()
+                            )
+                        );
                     }
 
 
@@ -1765,6 +1777,7 @@ namespace nn{
                 gradoutstrides.push_back(grad_out.size());
                 int stepinput = inputstrides[1];
                 int stepgradout = gradoutstrides[1];
+                int batch_size = grad_out.size() / stepgradout;
 
                 const T * inputget = input.get();
                 const T * weighttget = weight_t.get();
@@ -1777,51 +1790,54 @@ namespace nn{
                 if(input.device() == Cuda){
                     T alpha = 1.0f;
                     T beta = 1.0f;
-
-                    for(int inputoffset = 0 , gradoutoffset = 0;gradoutoffset < grad_out.size();inputoffset += stepinput , gradoutoffset += stepgradout){
-
-                        cublasSetStream_v2(handle , stream_gemm);
-                        
-                        if constexpr (std::is_same_v<T , float>){
-                            CHECK_CUBLAS(
-                            cublasSger_v2(
+                    if constexpr (std::is_same_v<T , float>){
+                        CHECK_CUBLAS(
+                            cublasSgemm_v2(
                                 handle,
-                                input.shape().back(),
-                                grad_out.shape().back(),
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_T,
+                                stepinput,
+                                stepgradout,
+                                batch_size,
                                 &alpha,
-                                inputget + inputoffset,
-                                1,
-
-                                gradoutget + gradoutoffset,
-                                1,
-                                gradweightget,
+                                inputget,
+                                stepinput,
+                                gradoutget,
+                                stepgradout,
+                                &beta,
+                                gradweightget , 
                                 grad_weight.shape().back()
-                            ));
-                        }
-                        else if constexpr (std::is_same_v<T , double>){
-                            CHECK_CUBLAS(
-                            cublasDger_v2(
-                                handle,
-                                input.shape().back(),
-                                grad_out.shape().back(),
-                                &alpha,
-                                inputget + inputoffset,
-                                1,
-
-                                gradoutget + gradoutoffset,
-                                1,
-                                gradweightget,
-                                grad_weight.shape().back()
-                            ));
-                        }
-                        cublasSetStream(handle , stream_add);
-                        _linear_add<T><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum , 0 , stream_add>>>(
-                            gradbiasget , 
-                            gradoutget + gradoutoffset , 
-                            grad_bias.size()
+                            )
                         );
-
                     }
+                    else if constexpr (std::is_same_v<T , double>){
+                        CHECK_CUBLAS(
+                            cublasDgemm_v2(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_T,
+                                stepinput,
+                                stepgradout,
+                                batch_size,
+                                &alpha,
+                                inputget,
+                                stepinput,
+                                gradoutget,
+                                stepgradout,
+                                &beta,
+                                gradweightget , 
+                                grad_weight.shape().back()
+                            )
+                        );
+                    }
+                    _linear_add_input_stride<T><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum>>>(
+                        gradbiasget , 
+                        gradoutget, 
+                        grad_bias.size(),
+                        stepgradout,
+                        batch_size
+                    );
+
 
                     if(optimal && input.get_grad_fn() == nullptr){
                         // no need to compute grad_input
@@ -1832,45 +1848,43 @@ namespace nn{
                     auto batch_size = grad_out.size() / stepgradout;
                     if constexpr (std::is_same_v<T , float>){
                         CHECK_CUBLAS(
-                        cublasSgemvStridedBatched(
-                            handle,
-                            CUBLAS_OP_N,
-                            input.shape().back(),
-                            grad_out.shape().back(),
-                            &alpha,
-                            weight.get(),
-                            weight.shape().back(),
-                            0,
-                            gradoutget,
-                            1,
-                            stepgradout,
-                            &beta,
-                            gradinputget,
-                            1,
-                            stepinput,
-                            grad_out.size() / stepgradout
-                        ));
+                            cublasSgemm_v2(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_N,
+                                stepinput,
+                                batch_size,
+                                stepgradout,
+                                &alpha,
+                                weight.get(),
+                                weight.shape().back(),
+                                gradoutget,
+                                stepgradout,
+                                &beta,
+                                gradinputget,
+                                stepinput
+                            )
+                        );
                     }
                     else if constexpr (std::is_same_v<T , double>){
                         CHECK_CUBLAS(
-                        cublasDgemvStridedBatched(
-                            handle,
-                            CUBLAS_OP_N,
-                            input.shape().back(),
-                            grad_out.shape().back(),
-                            &alpha,
-                            weight.get(),
-                            weight.shape().back(),
-                            0,
-                            gradoutget,
-                            1,
-                            stepgradout,
-                            &beta,
-                            gradinputget,
-                            1,
-                            stepinput,
-                            grad_out.size() / stepgradout
-                        ));
+                            cublasSgemm_v2(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_N,
+                                stepinput,
+                                batch_size,
+                                stepgradout,
+                                &alpha,
+                                weight.get(),
+                                weight.shape().back(),
+                                gradoutget,
+                                stepgradout,
+                                &beta,
+                                gradinputget,
+                                stepinput
+                            )
+                        );
                     }
 
                 }
@@ -1937,9 +1951,9 @@ namespace nn{
         const int channels , const int height, const int width,
         const int kh, const int kw , const int pad_h , const int pad_w , 
         const int stride_h , const int stride_w , 
-        const int height_col , const int width_col , const Device device){
+        const int height_col , const int width_col , const Device device , cudaStream_t stream = 0){
         if(device == Cuda){
-            im2col_gpu_2d<T , trans><<<CudaGetBlocks(n) , kCudaThreadsNum>>>(
+            im2col_gpu_2d<T , trans><<<CudaGetBlocks(n) , kCudaThreadsNum , 0 , stream>>>(
                 col , im , n , channels , height ,  width , 
                 kh , kw , pad_h , pad_w , 
                 stride_h , stride_w , 
@@ -2134,6 +2148,7 @@ namespace nn{
             T * buf;
             int buf_size;
             cublasHandle_t handle;
+            cudaStream_t streams[kStreamCount];
         public:
             Tensor<T> kernel;
             Tensor<T> bias;
@@ -2154,6 +2169,9 @@ namespace nn{
                     CHECK_CUBLAS(
                         cublasCreate(&handle)
                     );
+                    for(int i = 0;i < kStreamCount;i++){
+                        CHECK(cudaStreamCreate(&streams[i]));
+                    }
                 }
             }
             ~Conv2d(){
@@ -2169,6 +2187,9 @@ namespace nn{
                     CHECK_CUBLAS(
                         cublasDestroy(handle)
                     );
+                    for(int i = 0;i < kStreamCount;i++){
+                        CHECK(cudaStreamDestroy(streams[i]));
+                    }
                 }
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
@@ -2225,8 +2246,11 @@ namespace nn{
                         im2col_2d<T , false>(buf + i * resultcoutstep * ckernelsize, inputget + inputbatchoffset,
                             n, in_channels, h , w,
                             kh , kw , pad_h , pad_w , stride_h , stride_w,
-                            height_col , width_col,device
+                            height_col , width_col,device , streams[i % kStreamCount]
                         );
+                    }
+                    for(int i = 0;i < kStreamCount;i++){
+                        CHECK(cudaStreamSynchronize(streams[i]));
                     }
                     CHECK_CUBLAS(
                         cublasSgemmStridedBatched(
@@ -2491,8 +2515,11 @@ namespace nn{
                             
                             col2im_2d<T,false>(gradinget + inputbatchoffset , buf + i * ckernelsize * resultcoutstep , col2im_n,
                                 in_channels , h , w , kh , kw , 
-                                pad_h , pad_w , stride_h , stride_w , height_col , width_col , device);
+                                pad_h , pad_w , stride_h , stride_w , height_col , width_col , device , streams[i % kStreamCount]);
 
+                        }
+                        for(int i = 0;i < kStreamCount;i++){
+                            CHECK(cudaStreamSynchronize(streams[i]));
                         }
 
                     }
@@ -2868,7 +2895,7 @@ namespace nn{
             sum = bn_smem[tid];
             sum = warpReduceSum<T>(sum);
             if(tid == 0){
-                var_inv_cache[cid] = nn_rsqrt<T>(sum + epsilon);
+                var_inv_cache[cid] = nn_device_rsqrt<T>(sum + epsilon);
                 running_var[cid] = sum * (1 - momentum) + running_var[cid] * momentum;
             }
         }
@@ -2970,7 +2997,7 @@ namespace nn{
     __global__ void _calculate_inv_var(T * var_inv_cache , const T * var ,const int size , const T epsilon){
         int index = threadIdx.x + blockIdx.x * blockDim.x;
         if(index < size){
-            var_inv_cache[index] = nn_rsqrt<T>(var[index] + epsilon);
+            var_inv_cache[index] = nn_device_rsqrt<T>(var[index] + epsilon);
         }
     }
 

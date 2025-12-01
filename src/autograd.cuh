@@ -28,6 +28,14 @@ namespace mytorch{
             return topo_order;
         }
 
+        template <typename T>
+        __global__ void _linear_add(T * grad_out , const T * grad_in , int size){
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+            if(index >= size)
+                return;
+            grad_out[index] += grad_in[index];
+        }
+
 
         template <typename T>
         void compute_gradients_of_variables(Tensor<T> & root ,const Tensor<T> & output_grad){
@@ -53,7 +61,7 @@ namespace mytorch{
                         inputs[i].zero_grad();
                         node_to_output_grads_dict[inputs[i]] = make_view<T>(inputs[i].get_grad() , inputs[i].shape());
                     }
-                    nn::_linear_add<<<CudaGetBlocks(inputs[i].size()) , kCudaThreadsNum >>>(
+                    _linear_add<<<CudaGetBlocks(inputs[i].size()) , kCudaThreadsNum >>>(
                         node_to_output_grads_dict[inputs[i]].get() , 
                         input_grads[i].get() , 
                         inputs[i].size()

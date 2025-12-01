@@ -8,10 +8,10 @@ using namespace mytorch;
 
 int main(){
     DefaultDevice = Cuda;
-    auto X = rand<float>({512 , 3 , 32 , 32});
+    auto X = rand<float>({128 , 3 , 32 , 32});
     X.set_requires_grad(true);
-    auto y  = rand<float>({512}) * 10;
-    auto model = nn::MiniResNet<float>(10);
+    auto y  = rand<float>({128}) * 10;
+    auto model = nn::ResNet18<float>(10);
     auto params = model.parameters();
 
 
