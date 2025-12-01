@@ -12,7 +12,7 @@ int main(){
     X.set_requires_grad(true);
     auto y  = rand<float>({100}) * 10;
     auto model = nn::Sequential<float>({
-        std::make_shared<nn::Conv2d<float>>(3 , 2 ,3 , nn::NoPadding) ,
+        std::make_shared<nn::Conv2d<float>>(3 , 2 ,3 , 3) ,
         std::make_shared<nn::BatchNorm2d<float>>(2) ,
         std::make_shared<nn::ReLU<float>>() ,
         std::make_shared<nn::MaxPool2d<float>>(std::vector<size_t>{2 , 2}) ,

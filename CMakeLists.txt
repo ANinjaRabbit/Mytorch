@@ -26,6 +26,7 @@ set_target_properties(mytorch PROPERTIES
 
 target_include_directories(mytorch PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/dlpack/include
     ${CUDAToolkit_INCLUDE_DIRS}
 )
 

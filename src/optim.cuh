@@ -19,10 +19,9 @@ namespace mytorch{
         // base class for optimizers
         template <typename T>
         class Optimizer{
-            protected:
+            public:
                 T lr_;
                 T weight_decay_;
-            public:
                 friend class lr_scheduler::StepLR<T>;
                 friend class lr_scheduler::CosineAnnealingLR<T>;
                 Optimizer(T lr = T(0.01) , T weight_decay = T(0.0)) : lr_(lr) , weight_decay_(weight_decay){}
@@ -30,8 +29,8 @@ namespace mytorch{
         };
 
         template <typename T>
-        __global__ void _sgd_step_kernel(T * param, const T * grad,const T lr , const T weight_decay , const size_t size){
-            size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        __global__ void _sgd_step_kernel(T * param, const T * grad,const T lr , const T weight_decay , const int size){
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
             if(idx < size){
                 param[idx] -= lr * (grad[idx] +  weight_decay * param[idx]);
             }
@@ -51,7 +50,7 @@ namespace mytorch{
                 void step(){
                     if(device_ == Device::Cpu){
                         for(auto & param : params_)
-                            for(size_t i = 0 ; i < param.size() ; i++)
+                            for(int i = 0 ; i < param.size() ; i++)
                                 param.get()[i] -= this->lr_ * param.get_grad()[i] + this->lr_ * this->weight_decay_ * param.get()[i];
                     }
                     else{
@@ -84,9 +83,9 @@ namespace mytorch{
             const T lr,
             const T eps,
             const T weight_decay,
-            const size_t size
+            const int size
         ){
-            size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
             if(idx < size){
                 m[idx] = beta1 * m[idx] + (T(1) - beta1) * grad[idx];
                 v[idx] = beta2 * v[idx] + (T(1) - beta2) * grad[idx] * grad[idx];
@@ -108,9 +107,9 @@ namespace mytorch{
             const float lr,
             const float eps,
             const float weight_decay,
-            const size_t size
+            const int size
         ){
-            size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
             if(idx < size){
                 m[idx] = beta1 * m[idx] + (1.0 - beta1) * grad[idx];
                 v[idx] = beta2 * v[idx] + (1.0 - beta2) * grad[idx] * grad[idx];
@@ -129,7 +128,7 @@ namespace mytorch{
                 std::vector<Tensor<T>> params_;
                 std::vector<Tensor<T>> m_;
                 std::vector<Tensor<T>> v_;
-                size_t t_;
+                int t_;
                 Device device_;
             public:
                 Adam(std::vector<Tensor<T>> & params,const T lr = T(0.001) ,const T beta1 = T(0.9) , const T beta2 = T(0.999) , const T eps = T(1e-8) , const T weight_decay = T(0) , Device device = DefaultDevice) : Optimizer<T>(lr , weight_decay) , beta1_(beta1) , beta2_(beta2) , eps_(eps) , params_(params) , device_(device){
@@ -179,7 +178,7 @@ namespace mytorch{
                             auto grad = param.get_grad_tensor();
                             m = beta1_ * m + (T(1) - beta1_) * grad;
                             v = beta2_ * v + (T(1) - beta2_) * grad * grad;
-                            for(size_t j = 0 ; j < param.size() ; j++){
+                            for(int j = 0 ; j < param.size() ; j++){
                                 param.get()[j] -= this->lr_ * m.get()[j] / ((T(1) - beta1_t_) * (sqrtf(v.get()[j] / (T(1) - beta2_t_)) + eps_)) + this->lr_ * this->weight_decay_ * param.get()[j];
                             }
                         }
@@ -193,10 +192,10 @@ namespace mytorch{
             class StepLR{
                 std::shared_ptr<Optimizer<T>> optimizer_;
                 T gamma_;
-                size_t step_size_;
-                size_t last_epoch_;
+                int step_size_;
+                int last_epoch_;
                 public:
-                    StepLR(std::shared_ptr<Optimizer<T>> optimizer , T gamma = T(0.1) , size_t step_size = 1) : optimizer_(optimizer) , gamma_(gamma) , step_size_(step_size) , last_epoch_(0){}
+                    StepLR(std::shared_ptr<Optimizer<T>> optimizer , T gamma = T(0.1) , int step_size = 1) : optimizer_(optimizer) , gamma_(gamma) , step_size_(step_size) , last_epoch_(0){}
                     void step(){
                         last_epoch_++;
                         if(last_epoch_ % step_size_ == 0){
@@ -210,7 +209,7 @@ namespace mytorch{
                 std::shared_ptr<Optimizer<T>> optimizer_;
                 T T_max_;
                 T eta_min_;
-                size_t last_epoch_;
+                int last_epoch_;
                 public:
                     CosineAnnealingLR(std::shared_ptr<Optimizer<T>> optimizer , T T_max , T eta_min = T(0)) : optimizer_(optimizer) , T_max_(T_max) , eta_min_(eta_min) , last_epoch_(0){}
                     void step(){

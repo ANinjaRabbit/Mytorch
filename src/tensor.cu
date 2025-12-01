@@ -6,7 +6,7 @@ namespace mytorch{
     template class Tensor<float>;
     template class Tensor<double>;
 
-    Device DefaultDevice = Cpu;
+    Device DefaultDevice = Cuda;
 
 
     template <typename T>
@@ -100,10 +100,10 @@ namespace mytorch{
         return nn::Functional::SigmoidFunc<T>().forward({*this});
     }
     template <typename T>
-    Tensor<T> Tensor<T>::transpose(const std::vector<size_t> & perm ) const {
+    Tensor<T> Tensor<T>::transpose(const std::vector<int> & perm ) const {
         if(perm.empty()){
             // default permute last two dimensions
-            std::vector<size_t> default_perm(this->shape().size());
+            std::vector<int> default_perm(this->shape().size());
             if(default_perm.size() < 2){
                 throw std::runtime_error("Transpose error: tensor ndim < 2");
             }
@@ -132,7 +132,7 @@ namespace mytorch{
         return nn::Functional::TransposeFunc<T>(perm).forward({*this});
     }
     template <typename T>
-    Tensor<T> Tensor<T>::reshape(const std::vector<size_t> & newshape) const {
+    Tensor<T> Tensor<T>::reshape(const std::vector<int> & newshape) const {
         if(nn::Functional::prod_vec(newshape) != this->size()){
             std::cerr << "Reshape error: newshape size != tensor size" << std::endl;
             throw std::runtime_error("Reshape error: newshape size != tensor size");
@@ -160,7 +160,7 @@ namespace mytorch{
         return nn::Functional::MatmulFunc<T>().forward({*this , other});
     }
     template <typename T>
-    Tensor<T> Tensor<T>::maxpool2d(const std::vector<size_t> & kernel_shape) const {
+    Tensor<T> Tensor<T>::maxpool2d(const std::vector<int> & kernel_shape) const {
         if(this->requires_grad()){
             auto f =  std::make_shared<nn::Functional::MaxPool2dFunc<T>>(kernel_shape , this->device());
             Tensor<T> result = f->forward({*this});
@@ -183,7 +183,7 @@ namespace mytorch{
         }
     }
     template <typename T>
-    Tensor<T> Tensor<T>::sum(const size_t axis) const {
+    Tensor<T> Tensor<T>::sum(const int axis) const {
         if(this->requires_grad()){
             auto f =  std::make_shared<nn::Functional::SumFunc<T>>(axis);
             Tensor<T> result = f->forward({*this});

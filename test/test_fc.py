@@ -40,6 +40,7 @@ class TestFC(unittest.TestCase):
         torch_fc.weight = torch.nn.Parameter(torch.from_numpy(w))
         mytorch_fc.bias = mytorch.tensor_from_numpy(b)
         torch_fc.bias = torch.nn.Parameter(torch.from_numpy(b))
+        mytorch_fc.zero_grad()
         mytorch_out = mytorch_fc(mytorch_a)
         torch_out = torch_fc(torch_a)
 
@@ -87,6 +88,7 @@ class TestFC(unittest.TestCase):
         torch_fc.weight = torch.nn.Parameter(torch.from_numpy(w))
         mytorch_fc.bias = mytorch.tensor_from_numpy(b)
         torch_fc.bias = torch.nn.Parameter(torch.from_numpy(b))
+        mytorch_fc.zero_grad()
         mytorch_out = mytorch_fc(mytorch_a)
         torch_out = torch_fc(torch_a)
 

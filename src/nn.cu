@@ -249,388 +249,162 @@ namespace nn{
         
     }
 
+    template <typename T , bool transpose> // transpose mode
+    __global__ void im2col_gpu_2d(T * col , const T * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    ){
+        if constexpr (transpose){
+        CUDA_KERNEL_LOOP(index , n){
+            // launch c * height_col * width_col threads
+            const int h_index = index / width_col;
+            const int h_col = h_index  % height_col;
+            const int c_im = h_index / height_col;
+            const int w_col = index % width_col;
+            const int h_offset = h_col * stride_h - pad_h;
+            const int w_offset = w_col * stride_w - pad_w;
+            const int c_col = c_im * kh * kw;
+            T * col_ptr = col + (c_col * height_col + h_col) * width_col + w_col;
+            const T * im_ptr = im + (c_im * height + h_offset) * width + w_offset;
+            for(int i = 0; i < kh ; i++){
+                for(int j = 0; j < kw; j++){
+                    int h_im = i + h_offset;
+                    int w_im = j + w_offset;
+                    *col_ptr = (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                        im_ptr[i * width + j] : 0;
 
-    template<typename T , bool trans>
-    __global__ void im2col_gpu_2d(T * col , const T * im  , const size_t kernel_size 
-        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
-        , const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < h * w){
-            size_t ix, iy;
-            ix = index % w;
-            iy = index / w;
-            size_t m0 , m1;
-            m0 = iy - (kh >> 1);
-            m1 = ix - (kw >> 1);
-            size_t col_offset;
-            if constexpr (trans){
-                col_offset = index;
-            }
-            else{
-                col_offset = index * kernel_size;
-            }
-            size_t grid_index0 , grid_index1 , hw = h * w;
-            for(size_t coffset = 0;coffset < imsize; coffset += hw){
-                for(grid_index0 = 0;grid_index0 < kh;grid_index0++){
-                    for(grid_index1 = 0;grid_index1 < kw;grid_index1++)
-                    {
-                        bool is_valid = true;
-                        size_t k0 = m0 + grid_index0;
-                        size_t k1 = m1 + grid_index1;
-                        is_valid = k0 < h && k1 < w;
-                        size_t im_offset = k0 * w + k1;
-                        col[col_offset] =  is_valid ? im[im_offset + coffset] : 0;
-                        if constexpr (trans){
-                            col_offset += hw;
-                        }
-                        else{
-                            col_offset++;
-                        }
-                    }
+                    col_ptr += height_col * width_col;
                 }
             }
 
+
+        }
+        }
+        else{
+        CUDA_KERNEL_LOOP(index , n){
+            // launch c * height_col * width_col threads
+            const int h_index = index / width_col;
+            const int h_col = h_index  % height_col;
+            const int c_im = h_index / height_col;
+            const int w_col = index % width_col;
+            const int h_offset = h_col * stride_h - pad_h;
+            const int w_offset = w_col * stride_w - pad_w;
+            const int ckernelsize = kh * kw * channels; // size of whole kernel
+            T * col_ptr = col + (ckernelsize * (h_col * width_col + w_col) + c_im * kh * kw);
+            const T * im_ptr = im + (c_im * height + h_offset) * width + w_offset;
+            for(int i = 0; i < kh ; i++){
+                for(int j = 0; j < kw; j++){
+                    int h_im = i + h_offset;
+                    int w_im = j + w_offset;
+                    *col_ptr = (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                        im_ptr[i * width + j] : 0;
+                    
+                    col_ptr ++;
+                }
+            }
+        }
+            
         }
     }
     template
-    __global__ void im2col_gpu_2d<float , false>(float * col , const float * im  , const size_t kernel_size 
-        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
-        , const size_t imsize);
+    __global__ void im2col_gpu_2d<float , true>(float * col , const float * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
     template
-    __global__ void im2col_gpu_2d<float , true>(float * col , const float * im  , const size_t kernel_size 
-        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
-        , const size_t imsize);
+    __global__ void im2col_gpu_2d<float , false>(float * col , const float * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
+    template
+    __global__ void im2col_gpu_2d<double , true>(double * col , const double * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
+    template
+    __global__ void im2col_gpu_2d<double , false>(double * col , const double * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
 
 
 
-    template<typename T , bool trans>
-    __global__ void im2col_gpu_nopadding_2d(T * col , const T * im , 
-        const size_t kernel_size ,
-        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
-        , const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < rhw){
-            size_t m0 , m1; // index in image
-            size_t reduce_w = w - (kw - 1); // assume kw is odd
-            m1 = index % reduce_w;
-            m0 = index / reduce_w;
 
+    template <typename T> // non transpose mode
+    __global__ void col2im_gpu_2d(T * im , T * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    ){
+        CUDA_KERNEL_LOOP(index , n){ // n for im
+            T val = 0;
+            const int w_im = index % width + pad_w;
+            const int h_im = (index / width) % height + pad_h;
+            const int c_im = index / (height * width);
+            const int ckernelsize = kh * kw * channels; // size of whole kernel
 
-            size_t col_offset;
-            if constexpr (trans){
-                col_offset = index;
-            }
-            else {
-                col_offset = index * kernel_size;
-            }
-            size_t hw = h * w;
-            for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
-                for(size_t g0 = 0;g0 < kh ; g0 ++ ){
-                    for(size_t g1 = 0;g1 < kw; g1 ++){
-                        size_t ix = m0 + g0;
-                        size_t iy = m1 + g1;
-                        size_t im_offset = ix * w + iy;
-                        col[col_offset] =  im[im_offset + coffset];
-                        if constexpr (trans){
-                            col_offset += rhw;
-                        }
-                        else {
-                            col_offset++;
-                        }
-                    } 
+            const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+            const int w_col_end = min(w_im / stride_w + 1 , width_col);
+            const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+            const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+            for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                    int w_k = w_im - w_col * stride_w;
+                    int h_k = h_im - h_col * stride_h;
+
+                    int col_index = (h_col * width_col + w_col) * ckernelsize + (c_im * kh   +   h_k) * kw + w_k;
+                    val += col[col_index];
+                    // set col to 0 after use
+                    col[col_index] = 0;
                 }
             }
-
-        }
-    }
-
-     template
-    __global__ void im2col_gpu_nopadding_2d<float , false>(float * col , const float * im , 
-        const size_t kernel_size ,
-        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
-        , const size_t imsize);
-     template
-    __global__ void im2col_gpu_nopadding_2d<float , true>(float * col , const float * im , 
-        const size_t kernel_size ,
-        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
-        , const size_t imsize);
-
-
-    template<typename T>
-    __global__ void col2im_gpu_2d(T * im , const T * col  , const size_t kernel_size 
-        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
-        , const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < h * w){
-            size_t ix, iy;
-            ix = index % w;
-            iy = index / w;
-            size_t m0 , m1;
-            m0 = iy - (kh >> 1);
-            m1 = ix - (kw >> 1);
-            size_t col_offset;
-            col_offset = index * kernel_size;
-            size_t grid_index0 , grid_index1 , hw = h * w;
-            for(size_t coffset = 0;coffset < imsize; coffset += hw){
-                for(grid_index0 = 0;grid_index0 < kh;grid_index0++){
-                    for(grid_index1 = 0;grid_index1 < kw;grid_index1++)
-                    {
-                        bool is_valid = true;
-                        size_t k0 = m0 + grid_index0;
-                        size_t k1 = m1 + grid_index1;
-                        is_valid = k0 < h && k1 < w;
-                        size_t im_offset = k0 * w + k1;
-                        if(is_valid){
-                            atomicAdd( im + im_offset + coffset , col[col_offset]);
-                        }
-
-                        col_offset++;
-                    }
-                }
-            }
-
-        }
-    }
-     template
-    __global__ void col2im_gpu_2d<float>(float * im , const float * col  , const size_t kernel_size 
-        , const size_t kh , const size_t kw ,  const size_t h , const size_t w
-        , const size_t imsize);
-
-
-    template<typename T>
-    __global__ void col2im_gpu_nopadding_2d(T * im , const T * col , 
-        const size_t kernel_size ,
-        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
-        , const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < rhw){
-            size_t m0 , m1; // index in image
-            size_t reduce_imshape = w - (kw - 1); // assume kw is odd
-            m1 = index % reduce_imshape;
-            m0 = index / reduce_imshape;
-
-            size_t col_offset;
-            col_offset = index * kernel_size;
-            size_t hw = h * w;
-            for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
-                for(size_t g0 = 0;g0 < kh ; g0 ++ ){
-                    for(size_t g1 = 0;g1 < kw; g1 ++){
-                        size_t ix = m0 + g0;
-                        size_t iy = m1 + g1;
-                        size_t im_offset = ix * w + iy;
-                        atomicAdd(im + im_offset + coffset , col[col_offset]);
-                        col_offset++;
-                    } 
-                }
-            }
-
+            im[index] = val;
         }
     }
 
     template
-    __global__ void col2im_gpu_nopadding_2d<float>(float * im , const float * col , 
-        const size_t kernel_size ,
-        const size_t kh , const size_t kw ,  const size_t h , const size_t w , const size_t rhw
-        , const size_t imsize);
-
-    template<typename T , bool trans>
-    __global__ void im2col_gpu(T * col , const T * im , const size_t kernel_size , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape , const size_t hw ,  const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < hw){
-            size_t imidx[kCudaMultiDimMax];
-            for(int i = 0 , index_ = index;i<ndim;i++){
-                imidx[i] = index_ % imshape[ndim - i - 1];
-                index_ /= imshape[ndim - i - 1];
-            }
-            size_t grid_min[kCudaMultiDimMax];
-            for(int i = 0;i<ndim;i++){
-                grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
-            }
-            size_t col_offset;
-            if constexpr (trans){
-                col_offset = index;
-            }
-            else{
-                col_offset = index * kernel_size;
-            }
-            for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    bool is_valid = true;
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                        if( kernel_index[i] >= imshape[i]){
-                            is_valid = false;
-                            break;
-                        }
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    col[col_offset] =  is_valid ? im[im_offset + coffset] : 0;
-                    grid_index.next();
-                    if constexpr (trans){
-                        col_offset += hw;
-                    }
-                    else{
-                        col_offset++;
-                    }
-
-                }while(!grid_index.is_zero());
-            }
-
-        }
-    }
-
-
-    template<typename T , bool trans>
-    __global__ void im2col_gpu_nopadding(T * col , const T * im , 
-        const size_t kernel_size , const size_t ndim , 
-        const size_t * kernel_shape ,  const size_t * imshape , const size_t rhw , const size_t hw,
-        const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < rhw){
-            size_t grid_min[kCudaMultiDimMax]; // index in image
-            for(size_t i = 0 , index_ = index;i<ndim;i++){
-                size_t reduce_imshape = imshape[ndim - i - 1] - (kernel_shape[ndim - i - 1] >> 1) - 1;
-                grid_min[ndim - 1 - i] = index_ % reduce_imshape;
-                index_ /= reduce_imshape;
-            }
-
-            size_t col_offset;
-            if constexpr (trans){
-                col_offset = index;
-            }
-            else{
-                col_offset = index * kernel_size;
-            }
-
-            for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    col[col_offset] =  im[im_offset];
-                    grid_index.next();
-                    if constexpr (trans){
-                        col_offset += rhw;
-                    }
-                    else{
-                        col_offset++;
-                    }
-                }while(!grid_index.is_zero());
-            }
-
-        }
-    }
-
-    template<typename T>
-    __global__ void col2im_gpu(T * im , const T * col  , const size_t kernel_size 
-        , const size_t ndim , const size_t * kernel_shape ,  const size_t * imshape  , const size_t hw
-        , const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < hw){
-            size_t imidx[kCudaMultiDimMax];
-            for(int i = 0 , index_ = index;i<ndim;i++){
-                imidx[i] = index_ % imshape[ndim - i - 1];
-                index_ /= imshape[ndim - i - 1];
-            }
-            size_t grid_min[kCudaMultiDimMax];
-            for(int i = 0;i<ndim;i++){
-                grid_min[i] = imidx[ndim - i - 1] - kernel_shape[i] / 2;
-            }
-            size_t col_offset = index * kernel_size;
-            for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    bool is_valid = true;
-                    size_t kernel_index[kCudaMultiDimMax];
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                        if( kernel_index[i] >= imshape[i]){
-                            is_valid = false;
-                            break;
-                        }
-                    }
-                    if(is_valid){
-                        size_t im_offset = 0;
-                        for(int i = 0;i<ndim;i++){
-                            im_offset *= imshape[i];
-                            im_offset += kernel_index[i];
-                        }
-                        atomicAdd( &im[im_offset + coffset] , col[col_offset] );
-                    }
-                    grid_index.next();
-                    col_offset++;
-
-                }while(!grid_index.is_zero());
-            }
-
-        }
-    }
-    template<typename T>
-    __global__ void col2im_gpu_nopadding(T * im , const T * col , 
-        const size_t kernel_size , const size_t ndim , 
-        const size_t * kernel_shape ,  const size_t * imshape , const size_t rhw, const size_t hw,
-        const size_t imsize){
-        size_t index = threadIdx.x + blockDim.x * blockIdx.x;
-        if(index < rhw){
-            size_t grid_min[kCudaMultiDimMax]; // index in image
-            for(size_t i = 0 , index_ = index;i<ndim;i++){
-                size_t reduce_imshape = imshape[ndim - i - 1] - (kernel_shape[ndim - i - 1] >> 1) - 1;
-                grid_min[ndim - 1 - i] = index_ % reduce_imshape;
-                index_ /= reduce_imshape;
-            }
-
-            size_t col_offset = index * kernel_size;
-            for(size_t coffset = 0 ; coffset < imsize ; coffset += hw){
-                size_t kernel_index[kCudaMultiDimMax];
-                CudaMultiDimIndex grid_index(kernel_shape , ndim);
-                do{
-                    for(int i = 0;i<ndim;i++){
-                        kernel_index[i] = grid_min[i] + grid_index.get_index()[i]; 
-                    }
-                    size_t im_offset = 0;
-                    for(int i = 0;i<ndim;i++){
-                        im_offset *= imshape[i];
-                        im_offset += kernel_index[i];
-                    }
-                    atomicAdd( &im[im_offset + coffset] , col[col_offset] );
-                    grid_index.next();
-                    col_offset++;
-
-                }while(!grid_index.is_zero());
-            }
-
-        }
-    }
+    __global__ void col2im_gpu_2d<float>(float * im , float * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
+    template
+    __global__ void col2im_gpu_2d<double>(double * im , double * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    );
 
 
 
 
     namespace Functional {
-        __global__ void _sum_forward_kernel_f(float * output , const float * input ,  const size_t reduce , const size_t inner){
-            size_t ridx = threadIdx.x;
-            size_t iidx = blockIdx.x % inner;
-            size_t oidx = blockIdx.x / inner;
+        __global__ void _sum_forward_kernel_f(float * output , const float * input ,  const int reduce , const int inner){
+            int ridx = threadIdx.x;
+            int iidx = blockIdx.x % inner;
+            int oidx = blockIdx.x / inner;
             extern __shared__ float smem_sum_f[];
-            size_t warpId = ridx / 32;
-            size_t laneId = ridx % 32;
+            int warpId = ridx / 32;
+            int laneId = ridx % 32;
 
             constexpr int warpsPerBlock = kCudaThreadsNum / 32;
             float sum = 0.0f;
-            size_t ri = reduce * oidx * inner + iidx;
-            for(size_t i = ridx;i<reduce;i+=blockDim.x){
+            int ri = reduce * oidx * inner + iidx;
+            for(int i = ridx;i<reduce;i+=blockDim.x){
                 sum += input[ri + i * inner];
             }
             sum = warpReduceSum<float>(sum);
@@ -645,18 +419,18 @@ namespace nn{
             }
 
         }
-        __global__ void _sum_forward_kernel_d(double * output , const double * input ,  const size_t reduce , const size_t inner){
-            size_t ridx = threadIdx.x;
-            size_t iidx = blockIdx.x % inner;
-            size_t oidx = blockIdx.x / inner;
+        __global__ void _sum_forward_kernel_d(double * output , const double * input ,  const int reduce , const int inner){
+            int ridx = threadIdx.x;
+            int iidx = blockIdx.x % inner;
+            int oidx = blockIdx.x / inner;
             extern __shared__ double smem_sum_d[];
-            size_t warpId = ridx / 32;
-            size_t laneId = ridx % 32;
+            int warpId = ridx / 32;
+            int laneId = ridx % 32;
 
             constexpr int warpsPerBlock = kCudaThreadsNum / 32;
             double sum = 0.0f;
-            size_t ri = reduce * oidx * inner + iidx;
-            for(size_t i = ridx;i<reduce;i+=blockDim.x){
+            int ri = reduce * oidx * inner + iidx;
+            for(int i = ridx;i<reduce;i+=blockDim.x){
                 sum += input[ri + i * inner];
             }
             sum = warpReduceSum<double>(sum);

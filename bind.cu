@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <dlpack/dlpack.h>
 #include "src/tensor.cuh"
 #include "src/nn.cuh"
 #include "src/optim.cuh"
@@ -16,11 +17,11 @@ void bind_tensor(py::module &m) {
         It holds data, gradients, and links to gradient functions in the computation graph.
         )doc")
         .def(py::init<>(), "Create an empty Tensor.")
-        .def(py::init<const std::vector<size_t>&, const Device>(),
+        .def(py::init<const std::vector<int>&, const Device>(),
              py::arg("shape"), py::arg("device") = Cpu,
              "Create a Tensor with the given shape and device (CPU/CUDA).")
-        .def(py::init<T, const std::vector<size_t>&, const Device>(),
-             py::arg("value"), py::arg("shape") = std::vector<size_t>{1}, py::arg("device") = Cpu,
+        .def(py::init<T, const std::vector<int>&, const Device>(),
+             py::arg("value"), py::arg("shape") = std::vector<int>{1}, py::arg("device") = Cpu,
              "Create a Tensor filled with a constant value.")
 
         .def("size", &Tensor<T>::size, "Return the total number of elements.")
@@ -36,7 +37,7 @@ void bind_tensor(py::module &m) {
         .def("set_grad",  &Tensor<T>::set_grad,
              "Set the gradient Tensor for this Tensor.")
         .def("get_grad_tensor", &Tensor<T>::get_grad_tensor, "Return the gradient Tensor of this Tensor.")
-        .def("zero_grad", &Tensor<T>::zero_grad, "Set the gradient Tensor to zero.")
+        .def("zero_grad", [](Tensor<T>& self) { self.zero_grad(); }, "Set the gradient Tensor to zero.")
 
         .def("__add__", [](const Tensor<T>& self, const Tensor<T>& other) { return self + other; }, "Element-wise addition.")
         .def("__add__", [](const Tensor<T>& self, const T scalar) { return self + scalar; }, "Add a scalar to the Tensor.")
@@ -60,7 +61,7 @@ void bind_tensor(py::module &m) {
                 if (perm_obj.is_none()) {
                     return self.transpose({});  
                 } else {
-                    std::vector<size_t> perm = perm_obj.cast<std::vector<size_t>>();
+                    std::vector<int> perm = perm_obj.cast<std::vector<int>>();
                     return self.transpose(perm);
                 }
             }
@@ -82,6 +83,20 @@ void bind_tensor(py::module &m) {
         py::arg("grad_output") = py::none(),
         "Compute gradients in the backward pass.")
         .def("sum", &Tensor<T>::sum, "Sum all elements in the Tensor.")
+        .def("numpy" , [](const Tensor<T>& self){
+            if(self.get() == nullptr){
+                std::cerr << "Error: Tensor is nullptr. Cannot convert to numpy array." << std::endl;
+                throw std::runtime_error("Error: Tensor is nullptr. Cannot convert to numpy array.");
+            }
+            py::array_t<T> array(self.shape());
+            if(self.device() == Device::Cpu){
+                memcpy(array.mutable_data() , self.get() , sizeof(T) * self.size());
+            }
+            else if(self.device() == Device::Cuda){
+                CHECK(cudaMemcpy(array.mutable_data() , self.get() , sizeof(T) * self.size() , cudaMemcpyDeviceToHost));
+            }
+            return array;
+        })
         ;
 }
 
@@ -139,13 +154,14 @@ void bind_module(py::module &m_mod) {
         .def("__call__" , (Tensor<T>(Module<T>::*)(const Tensor<T>&)) &Module<T>::operator() , "Forward pass through the module for only one input.")
         .def("train" , &Module<T>::train , "Set the module to training mode.")
         .def("eval" , &Module<T>::eval , "Set the module to evaluation mode.")
+        .def("zero_grad" , &Module<T>::zero_grad , "Zero the gradients of all learnable parameters.")
         ;
 
         // Subclasses
         py::class_<Linear<T>, Module<T>, std::shared_ptr<Linear<T>>>(m_mod, "Linear",
         "Fully connected layer: y = xW^T + b.")
         .def(py::init(
-            [] (const size_t in_features , const size_t out_features , py::object device_obj)
+            [] (const int in_features , const int out_features , py::object device_obj)
             {
                 Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
                 return std::make_shared<Linear<T>>(in_features , out_features , device);
@@ -157,13 +173,54 @@ void bind_module(py::module &m_mod) {
 
         py::class_<Conv2d<T>, Module<T>, std::shared_ptr<Conv2d<T>>>(m_mod, "Conv2d",
             "Convolutional layer using a learnable kernel.")
-        .def(py::init([](const size_t in_features , const size_t out_features , const size_t kernel_size , py::object padding_mode_obj , py::object device_obj)
+        .def(py::init([](int in_channels,
+                        int out_channels,
+                        py::object kernel_size,
+                        py::object padding,
+                        py::object stride,
+                        py::object device_obj)
         {
-            PaddingMode padding_mode = padding_mode_obj.is_none() ? PaddingMode::NoPadding : padding_mode_obj.cast<PaddingMode>();
             Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
-            return std::make_shared<Conv2d<T>>(in_features , out_features , kernel_size , padding_mode , device);
-        }
-        ) , py::arg("in_features") , py::arg("out_features") , py::arg("kernel_size") , py::arg("padding_mode") = py::none() , py::arg("device") = py::none())
+            auto parse_pair = [](py::object obj, int &x, int &y) {
+                if (py::isinstance<py::int_>(obj)) {
+                    int v = obj.cast<int>();
+                    x = y = v;
+                } else if (py::isinstance<py::tuple>(obj)) {
+                    auto t = obj.cast<py::tuple>();
+                    if (t.size() != 2)
+                        throw std::runtime_error("Tuple size must be 2");
+                        auto item0 = t[0];
+                        auto item1 = t[1];
+                        x = py::cast<int>(item0);
+                        y = py::cast<int>(item1);
+                } else {
+                    throw std::runtime_error("Argument must be int or tuple");
+                }
+            };
+
+            int kw, kh;
+            int pad_w, pad_h;
+            int stride_w, stride_h;
+
+            parse_pair(kernel_size, kw, kh);
+            parse_pair(padding, pad_w, pad_h);
+            parse_pair(stride, stride_w, stride_h);
+
+            return std::make_shared<Conv2d<T>>(
+                in_channels, out_channels,
+                kw, kh,
+                pad_h, pad_w,
+                stride_h, stride_w,
+                device
+            );
+        }),
+        py::arg("in_channels"),
+        py::arg("out_channels"),
+        py::arg("kernel_size"),
+        py::arg("padding") = 0,
+        py::arg("stride") = 1,
+        py::arg("device") = py::none()
+        )
         .def_readwrite("kernel" , &Conv2d<T>::kernel)
         .def_readwrite("bias" , &Conv2d<T>::bias)
         ;
@@ -171,7 +228,7 @@ void bind_module(py::module &m_mod) {
     
     py::class_<MaxPool2d<T>, Module<T>, std::shared_ptr<MaxPool2d<T>>>(m_mod, "MaxPool2d",
         "2D max pooling layer.")
-        .def(py::init([](const std::vector<size_t> & kernel_shape , py::object device_obj)
+        .def(py::init([](const std::vector<int> & kernel_shape , py::object device_obj)
         {
             Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
             return std::make_shared<MaxPool2d<T>>(kernel_shape , device);
@@ -229,6 +286,18 @@ void bind_module(py::module &m_mod) {
         "Flatten layer to convert multi-dimensional input to a 1D vector.")
         .def(py::init<int , int>() , py::kw_only() , py::arg("start_dim") = 0 , py::arg("end_dim") = -1);
 
+    py::class_<ResNet18<T> , Module<T> , std::shared_ptr<ResNet18<T>>>(m_mod, "ResNet18",
+        "ResNet18 model.")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
+        .def("eval" , &ResNet18<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &ResNet18<T>::train , "Set the module to training mode.");
+
+    
+    py::class_<MiniResNet<T> , Module<T> , std::shared_ptr<MiniResNet<T>>>(m_mod, "MiniResNet",
+        "MiniResNet model.")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
+        .def("eval" , &MiniResNet<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &MiniResNet<T>::train , "Set the module to training mode.");
     
 }
 
@@ -324,13 +393,13 @@ void bind_optim(py::module &m_optim) {
         Methods:
             step(): Update learning rate for each parameter group.
         )doc")
-        .def(py::init([](std::shared_ptr<Optimizer<T>> optimizer, T gamma, size_t step_size)
+        .def(py::init([](std::shared_ptr<Optimizer<T>> optimizer, T gamma, int step_size)
             {
                 return std::make_shared<StepLR<T>>(optimizer, gamma, step_size);
             }),
             py::arg("optimizer"),
             py::arg("gamma") = T(0.1),
-            py::arg("step_size") = size_t(100))
+            py::arg("step_size") = int(100))
         .def("step", &StepLR<T>::step, "Update learning rate for each parameter group.");
 
 
@@ -361,8 +430,8 @@ void bind_optim(py::module &m_optim) {
 template <typename T>
 Tensor<T> tensor_from_numpy(py::array_t<float> data , Device device = DefaultDevice)
 {
-    std::vector<size_t> shape(data.ndim());
-    for (size_t i = 0; i < data.ndim(); ++i) {
+    std::vector<int> shape(data.ndim());
+    for (int i = 0; i < data.ndim(); ++i) {
         shape[i] = data.shape(i);
     }
     Tensor<T> tensor(shape , device);
@@ -386,11 +455,40 @@ py::array_t<float> numpy_from_tensor(const Tensor<T>& tensor)
     }
     return array;
 }
+
+template <typename T>
+Tensor<T> from_dlpack_deepcopy(py::capsule dlpack_capsule , Device targetdevice = DefaultDevice)
+{
+    DLManagedTensor* dlm = dlpack_capsule.get_pointer<DLManagedTensor>();
+
+    DLTensor& dl = dlm->dl_tensor;
+    DLDevice ctx = dl.device;
+
+    std::vector<int> shape(dl.ndim);
+    for (int i = 0; i < dl.ndim; i++) {
+        shape[i] = dl.shape[i];
+    }
+    Device device;
+    if (ctx.device_type == kDLCPU) {
+        device = Device::Cpu;
+    } else if (ctx.device_type == kDLCUDA) {
+        device = Device::Cuda;
+    } else {
+        throw std::runtime_error("Unsupported device type in DLPack");
+    }
+    T * ptr = reinterpret_cast<T*>(dl.data);
+
+
+    cuda_shared_pointer<T> cuda_ptr(ptr , std::accumulate(shape.begin() , shape.end() , 1 , std::multiplies<int>()) , targetdevice , device);
+
+    return make_view<T>(cuda_ptr , shape);
+}
+
 template <typename T>
 void bind_f(py::module & m){
 
     m.def("zeros",
-        [](const std::vector<size_t>& shape, py::object dev_obj) {
+        [](const std::vector<int>& shape, py::object dev_obj) {
             Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
             return zeros<T>(shape, dev);
         },
@@ -398,7 +496,7 @@ void bind_f(py::module & m){
         "Create tensor filled with 0");
 
     m.def("ones",
-        [](const std::vector<size_t>& shape, py::object dev_obj) {
+        [](const std::vector<int>& shape, py::object dev_obj) {
             Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
             return ones<T>(shape, dev);
         },
@@ -416,7 +514,7 @@ void bind_f(py::module & m){
         "Create tensor with range [start, end)");
 
     m.def("rand",
-        [](const std::vector<size_t>& shape, py::object dev_obj) {
+        [](const std::vector<int>& shape, py::object dev_obj) {
             Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
             return rand<T>(shape, dev);
         },
@@ -424,7 +522,7 @@ void bind_f(py::module & m){
         "Create uniform random tensor");
 
     m.def("randn",
-        [](const std::vector<size_t>& shape, py::object dev_obj) {
+        [](const std::vector<int>& shape, py::object dev_obj) {
             Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
             return randn<T>(shape, dev);
         },
@@ -432,7 +530,7 @@ void bind_f(py::module & m){
         "Create normal random tensor");
 
     m.def("full",
-        [](const std::vector<size_t>& shape, T value, py::object dev_obj) {
+        [](const std::vector<int>& shape, T value, py::object dev_obj) {
             Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
             return full<T>(shape, value, dev);
         },
@@ -468,18 +566,19 @@ PYBIND11_MODULE(mytorch, m) {
     auto m_mod = m.def_submodule("nn", "Neural network modules.");
     auto m_optim = m.def_submodule("optim", "Optimization algorithms.");
 
-    py::enum_<nn::PaddingMode>(m_mod, "PaddingMode")
-        .value("NoPadding", nn::PaddingMode::NoPadding)
-        .value("ZeroPadding", nn::PaddingMode::ZeroPadding)
-        .export_values();
 
     m.def("get_default_device", []() {
         return DefaultDevice;
-    });
-
-    m.def("set_default_device", [](Device d) {
+    }).def("set_default_device", [](Device d) {
         DefaultDevice = d;
-    });
+    })
+    .def("from_dlpack_deepcopy", [](py::capsule dlpack , py::object dev_obj) {
+        Device dev = dev_obj.is_none() ? DefaultDevice : dev_obj.cast<Device>();
+        return from_dlpack_deepcopy<float>(dlpack , dev);
+    },
+    py::arg("dlpack"),
+    py::arg("device") = py::none(),
+    "Create tensor from DLPack.");
     
 
     // Bind core components
