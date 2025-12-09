@@ -11,7 +11,7 @@ int main(){
     auto X = rand<float>({32 , 3 , 64 , 64});
     X.set_requires_grad(true);
     auto y  = rand<float>({32}) * 200;
-    auto model = nn::ResNet18<float>(200 , 64 , 64);
+    auto model = nn::ResNet34<float>(200 , 64 , 64);
     auto params = model.parameters();
 
 

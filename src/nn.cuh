@@ -2487,10 +2487,10 @@ namespace nn{
         const int kh, const int kw , const int pad_h , const int pad_w , 
         const int stride_h , const int stride_w , 
         const int height_col , const int width_col , const int batchsize , const int imbatchstep , const int colbatchstep , 
-        const Device device = Cuda
+        const Device device = Cuda , cudaStream_t stream = 0
     ){
         if(device == Cuda){
-            im2col_gpu_2d_batch<T , trans><<<CudaGetBlocks(n * batchsize * kh * kw) , kCudaThreadsNum >>>(
+            im2col_gpu_2d_batch<T , trans><<<CudaGetBlocks(n * batchsize * kh * kw) , kCudaThreadsNum , 0 , stream>>>(
                 col , im , n , channels , height ,  width , 
                 kh , kw , pad_h , pad_w , 
                 stride_h , stride_w , 
@@ -3397,6 +3397,7 @@ namespace nn{
             int kernel_buf_size;
             cublasHandle_t handle;
             cudaStream_t stream_bias;
+            cudaStream_t stream_kernel;
             bool use_impl;
         public:
             Tensor<T> kernel;
@@ -3425,6 +3426,9 @@ namespace nn{
                     CHECK(
                         cudaStreamCreate(&stream_bias)
                     );
+                    CHECK(
+                        cudaStreamCreate(&stream_kernel)
+                    );
                 }
             }
             ~GroupConv2d(){
@@ -3442,6 +3446,9 @@ namespace nn{
                     );
                     CHECK(
                         cudaStreamDestroy(stream_bias)
+                    );
+                    CHECK(
+                        cudaStreamDestroy(stream_kernel)
                     );
                 }
             }
@@ -3648,11 +3655,14 @@ namespace nn{
                             buf_size = groups * height_col * width_col * ckernelsize;
                             CHECK(cudaMalloc(&buf , buf_size * sizeof(T)));
                         }
+                        CHECK_CUBLAS(
+                            cublasSetStream(handle , stream_kernel)
+                        );
                         for(int i = 0;i < b;i++){
                             im2col_2d_batch<T , false>(buf, inputget + i * groups * groupcin * h * w,
                                 im2col_n, groupcin, h , w,
                                 kh , kw , pad_h , pad_w , stride_h , stride_w,
-                                height_col , width_col ,  groups , groupcin * h * w , height_col * width_col * ckernelsize , device
+                                height_col , width_col ,  groups , groupcin * h * w , height_col * width_col * ckernelsize , device , stream_kernel
                             );
                             CHECK_CUBLAS(
                                 cublasSgemmStridedBatched(
