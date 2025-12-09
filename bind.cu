@@ -129,6 +129,7 @@ void bind_function(py::module &m_func) {
     BIND_FUNC(SigmoidFunc);
     BIND_FUNC(TransposeFunc);
     BIND_FUNC(MaxPool2dFunc);
+    BIND_FUNC(AvgPool2dFunc);
     BIND_FUNC(ReshapeFunc);
     BIND_FUNC(MatmulFunc);
     BIND_FUNC(ModuleFunctionWrapper);
@@ -228,12 +229,97 @@ void bind_module(py::module &m_mod) {
     
     py::class_<MaxPool2d<T>, Module<T>, std::shared_ptr<MaxPool2d<T>>>(m_mod, "MaxPool2d",
         "2D max pooling layer.")
-        .def(py::init([](const std::vector<int> & kernel_shape , py::object device_obj)
+        .def(py::init([]( py::object kernel_size,
+                        py::object padding,
+                        py::object stride,
+                        py::object device_obj)
         {
             Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
-            return std::make_shared<MaxPool2d<T>>(kernel_shape , device);
-        }
-        ) , py::arg("kernel_shape") , py::arg("device") = py::none());
+            auto parse_pair = [](py::object obj, int &x, int &y) {
+                if (py::isinstance<py::int_>(obj)) {
+                    int v = obj.cast<int>();
+                    x = y = v;
+                } else if (py::isinstance<py::tuple>(obj)) {
+                    auto t = obj.cast<py::tuple>();
+                    if (t.size() != 2)
+                        throw std::runtime_error("Tuple size must be 2");
+                        auto item0 = t[0];
+                        auto item1 = t[1];
+                        x = py::cast<int>(item0);
+                        y = py::cast<int>(item1);
+                } else {
+                    throw std::runtime_error("Argument must be int or tuple");
+                }
+            };
+
+            int kw, kh;
+            int pad_w, pad_h;
+            int stride_w, stride_h;
+
+            parse_pair(kernel_size, kw, kh);
+            parse_pair(padding, pad_w, pad_h);
+            parse_pair(stride, stride_w, stride_h);
+
+            return std::make_shared<MaxPool2d<T>>(
+                kw, kh,
+                pad_h, pad_w,
+                stride_h, stride_w,
+                device
+            );
+        }),
+        py::arg("kernel_size"),
+        py::arg("padding") = 0,
+        py::arg("stride") = 0,
+        py::arg("device") = py::none()
+        );
+    
+     py::class_<AvgPool2d<T>, Module<T>, std::shared_ptr<AvgPool2d<T>>>(m_mod, "AvgPool2d",
+        "2D average pooling layer.")
+        .def(py::init([]( py::object kernel_size,
+                        py::object padding,
+                        py::object stride,
+                        py::object device_obj)
+        {
+            Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
+            auto parse_pair = [](py::object obj, int &x, int &y) {
+                if (py::isinstance<py::int_>(obj)) {
+                    int v = obj.cast<int>();
+                    x = y = v;
+                } else if (py::isinstance<py::tuple>(obj)) {
+                    auto t = obj.cast<py::tuple>();
+                    if (t.size() != 2)
+                        throw std::runtime_error("Tuple size must be 2");
+                        auto item0 = t[0];
+                        auto item1 = t[1];
+                        x = py::cast<int>(item0);
+                        y = py::cast<int>(item1);
+                } else {
+                    throw std::runtime_error("Argument must be int or tuple");
+                }
+            };
+
+            int kw, kh;
+            int pad_w, pad_h;
+            int stride_w, stride_h;
+
+            parse_pair(kernel_size, kw, kh);
+            parse_pair(padding, pad_w, pad_h);
+            parse_pair(stride, stride_w, stride_h);
+
+            return std::make_shared<AvgPool2d<T>>(
+                kw, kh,
+                pad_h, pad_w,
+                stride_h, stride_w,
+                device
+            );
+        }),
+        py::arg("kernel_size"),
+        py::arg("padding") = 0,
+        py::arg("stride") = 0,
+        py::arg("device") = py::none()
+        );
+    
+    
 
     py::class_<Softmax<T>, Module<T>, std::shared_ptr<Softmax<T>>>(m_mod, "Softmax",
         "Softmax activation module.")
@@ -286,18 +372,45 @@ void bind_module(py::module &m_mod) {
         "Flatten layer to convert multi-dimensional input to a 1D vector.")
         .def(py::init<int , int>() , py::kw_only() , py::arg("start_dim") = 0 , py::arg("end_dim") = -1);
 
-    py::class_<ResNet18<T> , Module<T> , std::shared_ptr<ResNet18<T>>>(m_mod, "ResNet18",
-        "ResNet18 model.")
+    py::class_<ResNet18Cifar<T> , Module<T> , std::shared_ptr<ResNet18Cifar<T>>>(m_mod, "ResNet18Cifar",
+        "ResNet18 model for CIFAR-10.")
         .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
+        .def("eval" , &ResNet18Cifar<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &ResNet18Cifar<T>::train , "Set the module to training mode.");
+
+    py::class_<ResNeXt18Cifar<T> , Module<T> , std::shared_ptr<ResNeXt18Cifar<T>>>(m_mod, "ResNeXt18Cifar",
+        "ResNeXt18 model for CIFAR-10.")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
+        .def("eval" , &ResNeXt18Cifar<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &ResNeXt18Cifar<T>::train , "Set the module to training mode.");
+    
+    py::class_<ResNet18<T> , Module<T> , std::shared_ptr<ResNet18<T>>>(m_mod, "ResNet18",
+        "ResNet18 model")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") , py::arg("w"))
         .def("eval" , &ResNet18<T>::eval , "Set the module to evaluation mode.")
         .def("train" , &ResNet18<T>::train , "Set the module to training mode.");
+    
+    py::class_<ResNet34<T> , Module<T> , std::shared_ptr<ResNet34<T>>>(m_mod, "ResNet34",
+        "ResNet34 model")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") , py::arg("w"))
+        .def("eval" , &ResNet34<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &ResNet34<T>::train , "Set the module to training mode.");
+
+    py::class_<ResNeXt18<T> , Module<T> , std::shared_ptr<ResNeXt18<T>>>(m_mod, "ResNeXt18",
+        "ResNeXt18 model")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") , py::arg("w"))
+        .def("eval" , &ResNeXt18<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &ResNeXt18<T>::train , "Set the module to training mode.");
+    
+    py::class_<ResNeXt34<T> , Module<T> , std::shared_ptr<ResNeXt34<T>>>(m_mod, "ResNeXt34",
+        "ResNeXt34 model")
+        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") , py::arg("w"))
+        .def("eval" , &ResNeXt34<T>::eval , "Set the module to evaluation mode.")
+        .def("train" , &ResNeXt34<T>::train , "Set the module to training mode.");
 
     
-    py::class_<MiniResNet<T> , Module<T> , std::shared_ptr<MiniResNet<T>>>(m_mod, "MiniResNet",
-        "MiniResNet model.")
-        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
-        .def("eval" , &MiniResNet<T>::eval , "Set the module to evaluation mode.")
-        .def("train" , &MiniResNet<T>::train , "Set the module to training mode.");
+
+
     
 }
 
@@ -325,24 +438,28 @@ void bind_optim(py::module &m_optim) {
         )doc")
         .def(py::init([](std::vector<Tensor<T>> &params,
                  T lr,
+                 T momentum,
+                 T dampening,
                  T weight_decay,
                  py::object device_obj)
             {
                 Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
-                return std::make_shared<SGD<T>>(params, lr, device);
+                return std::make_shared<SGD<T>>(params, lr, momentum, dampening, weight_decay, device);
             }),
             py::arg("params"),
             py::kw_only(),
             py::arg("lr") = T(0.01),
+            py::arg("momentum") = T(0.0),
+            py::arg("dampening") = T(0.0),
             py::arg("weight_decay") = T(0.0),
             py::arg("device") = py::none())
         .def("zero_grad" , &SGD<T>::zero_grad , "Zero the gradients of all parameters.")
         .def("step", &SGD<T>::step, "Perform one SGD update step.");
 
-    // ---------------- Adam ----------------
-    py::class_<Adam<T> , Optimizer<T> , std::shared_ptr<Adam<T>>>(m_optim, "Adam",
+    // ---------------- AdamW ----------------
+    py::class_<AdamW<T> , Optimizer<T> , std::shared_ptr<AdamW<T>>>(m_optim, "AdamW",
         R"doc(
-        Adam optimizer.
+        AdamW optimizer.
 
         Args:
             params (List[Tensor]): List of tensors to optimize.
@@ -365,7 +482,7 @@ void bind_optim(py::module &m_optim) {
                 py::object device_obj)
             {
                 Device device = device_obj.is_none() ? DefaultDevice : device_obj.cast<Device>();
-                return std::make_shared<Adam<T>>(params, lr, beta1, beta2, eps, weight_decay, device);
+                return std::make_shared<AdamW<T>>(params, lr, beta1, beta2, eps, weight_decay, device);
             }),
             py::arg("params"),
             py::arg("lr") = T(0.001),
@@ -374,8 +491,8 @@ void bind_optim(py::module &m_optim) {
             py::arg("eps") = T(1e-8),
             py::arg("weight_decay") = T(0),
             py::arg("device") = py::none())
-        .def("zero_grad" , &Adam<T>::zero_grad , "Zero the gradients of all parameters.")
-        .def("step", &Adam<T>::step, "Perform one Adam update step.");
+        .def("zero_grad" , &AdamW<T>::zero_grad , "Zero the gradients of all parameters.")
+        .def("step", &AdamW<T>::step, "Perform one AdamW update step.");
 
         auto m_lr = m_optim.def_submodule("lr_scheduler" , "Learning rate scheduler.");
         using namespace mytorch::optim::lr_scheduler;

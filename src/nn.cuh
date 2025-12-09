@@ -2,6 +2,7 @@
 #define _NN_H_
 
 #include "tensor.cuh"
+#include "math.cuh"
 #include <cublas_v2.h>
 #include <cmath>
 
@@ -10,59 +11,6 @@ namespace nn{
     constexpr int kCudaTransposeTileSize = 4;
     constexpr int kCudaMultiDimMax = 16;
     constexpr int kStreamCount = 8;
-
-    // defines general math functions for use
-    template <typename T>
-    __device__ __host__ inline T nn_rsqrt(T x){
-        return rsqrt(x);
-    }
-    template <> 
-    __device__ __host__ inline float nn_rsqrt(float x){
-        return rsqrtf(x);
-    }
-
-    template <typename T>
-    __device__ inline T nn_device_rsqrt(T x){
-        return rsqrt(x);
-    }
-    template <> 
-    __device__ inline float nn_device_rsqrt(float x){
-        return __frsqrt_rn(x);
-    }
-
-
-    template <typename T>
-    __device__ __host__ inline T nn_sqrt(T x){
-        return sqrt(x);
-    }
-    template <> 
-    __device__ __host__ inline float nn_sqrt(float x){
-        return sqrtf(x);
-    }
-
-    template <typename T>
-    __device__ inline T nn_device_sqrt(T x){
-        return __fsqrt_rn(x);
-    }
-
-    template <typename T>
-    __device__ __host__ inline T nn_exp(T x){
-        return exp(x);
-    }
-    template <> 
-    __device__ __host__ inline float nn_exp(float x){
-        return expf(x);
-    }
-    template <typename T>
-    __device__ inline T nn_exp_device(T x){
-        return exp(x);
-    }
-    template <>
-    __device__ inline float nn_exp_device(float x){
-        return __expf(x);
-    }
-
-
 
 
 
@@ -98,10 +46,287 @@ namespace nn{
             }
     };
 
-    template <typename T >
-    __device__ T warpReduceMax(T val);
-    template <typename T >
-    __device__ T warpReduceSum(T val);
+
+
+    template <typename T>
+    __device__ T warpReduceMax(T val) {
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            val = fmaxf(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+        }
+        return val;
+    }
+
+
+    template <typename T>
+    __device__ T warpReduceSum(T val) {
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+        }
+        return val;
+    }
+
+    template <typename T , bool transpose> // transpose mode
+    __global__ void im2col_gpu_2d(T * col , const T * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    ){
+        if constexpr (transpose){
+        CUDA_KERNEL_LOOP(index , n){
+            // launch c * height_col * width_col threads
+            const int h_index = index / width_col;
+            const int h_col = h_index  % height_col;
+            const int c_im = h_index / height_col;
+            const int w_col = index % width_col;
+            const int h_offset = h_col * stride_h - pad_h;
+            const int w_offset = w_col * stride_w - pad_w;
+            const int c_col = c_im * kh * kw;
+            T * col_ptr = col + (c_col * height_col + h_col) * width_col + w_col;
+            const T * im_ptr = im + (c_im * height + h_offset) * width + w_offset;
+            for(int i = 0; i < kh ; i++){
+                for(int j = 0; j < kw; j++){
+                    int h_im = i + h_offset;
+                    int w_im = j + w_offset;
+                    *col_ptr = (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                        im_ptr[i * width + j] : 0;
+
+                    col_ptr += height_col * width_col;
+                }
+            }
+
+
+        }
+        }
+        else{
+        CUDA_KERNEL_LOOP(index , n){
+            // launch c * height_col * width_col threads
+            const int h_index = index / width_col;
+            const int h_col = h_index  % height_col;
+            const int c_im = h_index / height_col;
+            const int w_col = index % width_col;
+            const int h_offset = h_col * stride_h - pad_h;
+            const int w_offset = w_col * stride_w - pad_w;
+            const int ckernelsize = kh * kw * channels; // size of whole kernel
+            T * col_ptr = col + (ckernelsize * (h_col * width_col + w_col) + c_im * kh * kw);
+            const T * im_ptr = im + (c_im * height + h_offset) * width + w_offset;
+            for(int i = 0; i < kh ; i++){
+                for(int j = 0; j < kw; j++){
+                    int h_im = i + h_offset;
+                    int w_im = j + w_offset;
+                    *col_ptr = (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                        im_ptr[i * width + j] : 0;
+                    
+                    col_ptr ++;
+                }
+            }
+        }
+            
+        }
+    }
+
+    template <typename T , bool transpose> // transpose mode
+    __global__ void im2col_gpu_2d_batch(T * col , const T * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col ,
+         const int batchsize , const int imbatchstep , const int colbatchstep
+    ){
+        int index = blockIdx.x * blockDim.x + threadIdx.x;
+        if constexpr (transpose){
+        if(index < n * kh * kw * batchsize){
+            int j = index % kw;
+            int i = (index / kw) % kh;
+            index = index / (kh * kw);
+            const int batchid = index / n;
+            index = index % n;
+            const int imbatchoffset = batchid * imbatchstep;
+            const int colbatchoffset = batchid * colbatchstep;
+            // launch c * height_col * width_col threads
+            const int h_index = index / width_col;
+            const int h_col = h_index  % height_col;
+            const int c_im = h_index / height_col;
+            const int w_col = index % width_col;
+            const int h_offset = h_col * stride_h - pad_h;
+            const int w_offset = w_col * stride_w - pad_w;
+            const int c_col = c_im * kh * kw;
+            T * col_ptr = col + ((c_col + i * kw + j) * height_col + h_col) * width_col + w_col + colbatchoffset;
+            const T * im_ptr = im + (c_im * height + h_offset) * width + w_offset + imbatchoffset;
+            int h_im = i + h_offset;
+            int w_im = j + w_offset;
+            *col_ptr = (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                im_ptr[i * width + j] : 0;
+            ;
+
+
+        }
+        }
+        else{
+        if(index < n * kh * kw * batchsize){
+            int j = index % kw;
+            int i = (index / kw) % kh;
+            index = index / (kh * kw);
+            const int batchid = index / n;
+            index = index % n;
+            const int imbatchoffset = batchid * imbatchstep;
+            const int colbatchoffset = batchid * colbatchstep;
+            // launch c * height_col * width_col threads
+            const int h_index = index / width_col;
+            const int h_col = h_index  % height_col;
+            const int c_im = h_index / height_col;
+            const int w_col = index % width_col;
+            const int h_offset = h_col * stride_h - pad_h;
+            const int w_offset = w_col * stride_w - pad_w;
+            const int ckernelsize = kh * kw * channels; // size of whole kernel
+            T * col_ptr = col + (ckernelsize * (h_col * width_col + w_col) + c_im * kh * kw) + colbatchoffset + i * kw + j;
+            const T * im_ptr = im + (c_im * height + h_offset) * width + w_offset + imbatchoffset;
+            int h_im = i + h_offset;
+            int w_im = j + w_offset;
+            *col_ptr = (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+                im_ptr[i * width + j] : 0;
+            
+        }
+            
+        }
+    }
+
+
+
+    template <typename T , bool transpose> // non transpose mode
+    __global__ void col2im_gpu_2d(T * im , T * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+    ){
+        if constexpr (!transpose){
+            CUDA_KERNEL_LOOP(index , n){ // n for im
+                T val = 0;
+                const int w_im = index % width + pad_w;
+                const int h_im = (index / width) % height + pad_h;
+                const int c_im = index / (height * width);
+                const int ckernelsize = kh * kw * channels; // size of whole kernel
+
+                const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+                for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                    for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                        int w_k = w_im - w_col * stride_w;
+                        int h_k = h_im - h_col * stride_h;
+
+                        int col_index = (h_col * width_col + w_col) * ckernelsize + (c_im * kh   +   h_k) * kw + w_k;
+                        val += col[col_index];
+                    }
+                }
+                im[index] = val;
+            }
+        }
+        else{
+            CUDA_KERNEL_LOOP(index , n){ // n for im
+                T val = 0;
+                const int w_im = index % width + pad_w;
+                const int h_im = (index / width) % height + pad_h;
+                const int c_im = index / (height * width);
+
+                const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+                for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                    for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                        int w_k = w_im - w_col * stride_w;
+                        int h_k = h_im - h_col * stride_h;
+
+                        int col_index = (((c_im * kh + h_k) * kw + w_k) *
+                                height_col + h_col) * width_col + w_col;
+                        val += col[col_index];
+                    }
+                }
+                im[index] = val;
+            }
+
+        }
+    }
+
+    template <typename T , bool transpose> // non transpose mode
+    __global__ void col2im_gpu_2d_batch(T * im , T * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col
+        , const int batchsize , const int imbatchstep , const int colbatchstep
+    ){
+        int index = blockIdx.x * blockDim.x + threadIdx.x;
+        if constexpr (!transpose){
+            if(index < n * batchsize){
+                const int batchid = index / n;
+                index = index % n;
+                const int imbatchoffset = batchid * imbatchstep;
+                const int colbatchoffset = batchid * colbatchstep;
+                T val = 0;
+                const int w_im = index % width + pad_w;
+                const int h_im = (index / width) % height + pad_h;
+                const int c_im = index / (height * width);
+                const int ckernelsize = kh * kw * channels; // size of whole kernel
+
+                const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+                for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                    for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                        int w_k = w_im - w_col * stride_w;
+                        int h_k = h_im - h_col * stride_h;
+
+                        int col_index = (h_col * width_col + w_col) * ckernelsize + (c_im * kh   +   h_k) * kw + w_k;
+                        val += col[col_index + colbatchoffset];
+                    }
+                }
+                im[index + imbatchoffset] = val;
+            }
+        }
+        else{
+            if(index < n * batchsize){
+                const int batchid = index / n;
+                index = index % n;
+                const int imbatchoffset = batchid * imbatchstep;
+                const int colbatchoffset = batchid * colbatchstep;
+                T val = 0;
+                const int w_im = index % width + pad_w;
+                const int h_im = (index / width) % height + pad_h;
+                const int c_im = index / (height * width);
+
+                const int w_col_start = (w_im < kw) ? 0 : (w_im - kw) /stride_w + 1;
+                const int w_col_end = min(w_im / stride_w + 1 , width_col);
+                const int h_col_start = (h_im < kh) ? 0 : (h_im - kh) /stride_h + 1;
+                const int h_col_end = min(h_im / stride_h + 1 , height_col);
+
+                for(int h_col = h_col_start; h_col < h_col_end; h_col++){
+                    for(int w_col = w_col_start; w_col < w_col_end; w_col++){
+                        int w_k = w_im - w_col * stride_w;
+                        int h_k = h_im - h_col * stride_h;
+
+                        int col_index = (((c_im * kh + h_k) * kw + w_k) *
+                                height_col + h_col) * width_col + w_col;
+                        val += col[col_index + colbatchoffset];
+                    }
+                }
+                im[index + imbatchoffset] = val;
+            }
+
+        }
+    }
+
+
+
 
     template <typename T>
     class Sequential : public Module<T>{
@@ -191,6 +416,118 @@ namespace nn{
 
 
     namespace Functional{
+        template <typename T> 
+        __global__ void maxpool_gpu_2d_batch(
+            T * output , int * mask ,  const T * input , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep
+        ){
+
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+            const int batchid = index / n;
+            const int inputoffset = batchid * inputbatchstep;
+            const int outputoffset = batchid * outputbatchstep;
+            index = index % n;
+            if(batchid < batchsize){
+                const int w_p = index % pooled_width;
+                const int h_p = (index / pooled_width) % pooled_height;
+                const int c = index / (pooled_width * pooled_height);
+                int wstart = w_p * stride_w - pad_w;
+                int hstart = h_p * stride_h - pad_h;
+                const int wend = min(wstart + kw , width);
+                const int hend = min(hstart + kh , height);
+                hstart = max(hstart , 0);
+                wstart = max(wstart , 0);
+                T maxval = -FLT_MAX;
+                int maxidx = -1;
+                const T * input_str = input + inputoffset + c * height * width;
+                for(int h = hstart;h<hend;h++){
+                    for(int w = wstart;w<wend;w++){
+                        if(input_str[h * width + w] > maxval){
+                            maxidx = h * width + w;
+                            maxval = input_str[maxidx];
+                        }
+                    }
+                }
+                output[outputoffset + index] = maxval;
+                mask[outputoffset + index] = maxidx + inputoffset + c * height * width;
+            }
+        }
+
+        template <typename T> 
+        __global__ void avgpool_forward_gpu_2d_batch(
+            T * output , const T * input , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep
+        ){
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+            const int batchid = index / n;
+            const int inputoffset = batchid * inputbatchstep;
+            const int outputoffset = batchid * outputbatchstep;
+            index = index % n;
+            if(batchid < batchsize){
+                const int w_p = index % pooled_width;
+                const int h_p = (index / pooled_width) % pooled_height;
+                const int c = index / (pooled_width * pooled_height);
+                int wstart = w_p * stride_w - pad_w;
+                int hstart = h_p * stride_h - pad_h;
+                const int wend = min(wstart + kw , width);
+                const int hend = min(hstart + kh , height);
+                hstart = max(hstart , 0);
+                wstart = max(wstart , 0);
+                T sum = 0.0;
+                const T * input_str = input + inputoffset + c * height * width;
+                for(int h = hstart;h<hend;h++){
+                    for(int w = wstart;w<wend;w++){
+                        sum += input_str[h * width + w];
+                    }
+                }
+                output[outputoffset + index] = sum / (T)(kh * kw);
+            }
+        }
+
+
+
+        template <typename T> 
+        __global__ void avgpool_backward_gpu_2d_batch(
+            T * grad_input , const T * grad_output , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep
+        ){
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+            const int batchid = index / n;
+            const int inputoffset = batchid * inputbatchstep;
+            const int outputoffset = batchid * outputbatchstep;
+            index = index % n;
+            if(batchid < batchsize){
+                const int w_p = index % pooled_width;
+                const int h_p = (index / pooled_width) % pooled_height;
+                const int c = index / (pooled_width * pooled_height);
+                int wstart = w_p * stride_w - pad_w;
+                int hstart = h_p * stride_h - pad_h;
+                const int wend = min(wstart + kw , width);
+                const int hend = min(hstart + kh , height);
+                hstart = max(hstart , 0);
+                wstart = max(wstart , 0);
+                T * input_str = grad_input + inputoffset + c * height * width;
+                const T grad = grad_output[outputoffset + index] / (T)(kh * kw);
+                for(int h = hstart;h<hend;h++){
+                    for(int w = wstart;w<wend;w++){
+                        input_str[h * width + w] = grad;
+                    }
+                }
+            }
+        }
+
 
 
         template <typename T>
@@ -254,7 +591,7 @@ namespace nn{
                     if(inputs[0].requires_grad()){
                         input = inputs[0];
                     }
-                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , false , inputs[0].device());
                     if (result.device() == Cuda){
                         _neg_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , inputs[0].get() , result.size() );
                     }
@@ -296,7 +633,6 @@ namespace nn{
             private:
                 Tensor<T> a , b;
             public:
-                AddFunc() = default;
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
                     if (inputs.size() != 2 || inputs[0].shape() != inputs[1].shape()){
                         throw std::runtime_error("AddFunc error!");
@@ -308,7 +644,7 @@ namespace nn{
                     if (inputs[0].device() != inputs[1].device()){
                         throw std::runtime_error("AddFunc error!");
                     }
-                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , false , inputs[0].device());
                     if (result.device() == Cuda){
                         _add_forward_kernel<<<CudaGetBlocks(result.size()), kCudaThreadsNum>>>(result.get(), inputs[0].get(), inputs[1].get() , result.size());
                     }
@@ -317,11 +653,11 @@ namespace nn{
                             result.get()[i] = inputs[0].get()[i] + inputs[1].get()[i];
                         }
                     }
-                     result.set_requires_grad(inputs[0].requires_grad() || inputs[1].requires_grad());
+                    result.set_requires_grad(inputs[0].requires_grad() || inputs[1].requires_grad());
                     return std::move(result);
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
-                    return {grad_out.deepcopy() , grad_out.deepcopy()};
+                    return {grad_out , grad_out};
                 }
                 std::vector<Tensor<T>> get_inputs() const override{
                     return {a , b};
@@ -351,7 +687,7 @@ namespace nn{
                     if (inputs[0].device() != inputs[1].device()){
                         throw std::runtime_error("SubFunc error!");
                     }
-                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , false , inputs[0].device());
                     if (result.device() == Cuda){
                         _sub_forward_kernel<<<CudaGetBlocks(result.size()), kCudaThreadsNum>>>(result.get(), inputs[0].get(), inputs[1].get(),result.size());
                     }
@@ -364,7 +700,7 @@ namespace nn{
                     return std::move(result);
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_output) override{
-                    return {grad_output.deepcopy() , (-grad_output).deepcopy()};
+                    return {grad_output , (-grad_output)};
                 }
                 std::vector<Tensor<T>> get_inputs() const override{
                     return {a , b};
@@ -392,7 +728,7 @@ namespace nn{
                     if(inputs[0].requires_grad() || inputs[1].requires_grad()){
                         a = inputs[0] , b = inputs[1];
                     }
-                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , false , inputs[0].device());
                     if(result.device() == Cuda){
                         _mul_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , inputs[0].get() , inputs[1].get(), result.size());
                     }
@@ -458,7 +794,7 @@ namespace nn{
                     if(inputs[0].requires_grad() || inputs[1].requires_grad()){
                         a = inputs[0] , b = inputs[1];
                     }
-                    Tensor<T> result(inputs[0].shape() , inputs[0].device());
+                    Tensor<T> result(inputs[0].shape() , false , inputs[0].device());
                     if(result.device() == Cuda){
                         _div_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , inputs[0].get() , inputs[1].get(), result.size());
                     }
@@ -525,7 +861,7 @@ namespace nn{
                     if(input[0].requires_grad()){
                         a = input[0];
                     }
-                    Tensor<T> result(input[0].shape() , input[0].device());
+                    Tensor<T> result(input[0].shape() , false , input[0].device());
                     int size = result.size();
                     mask = cuda_shared_pointer<bool>(size , input[0].device());
                     if( input[0].device() == Cuda){
@@ -541,7 +877,7 @@ namespace nn{
                     return std::move(result);
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
-                    Tensor<T> grad_input(grad_out.shape() , grad_out.device());
+                    Tensor<T> grad_input(grad_out.shape() , false , grad_out.device());
                     int size = grad_input.size();
                     if(grad_out.device() == Cuda){
                         _relu_backward_kernel<<<CudaGetBlocks(size) , kCudaThreadsNum>>>(grad_input.get() , grad_out.get() , mask.get() , size);
@@ -604,7 +940,7 @@ namespace nn{
                     if(resultshape.empty()){
                         resultshape.push_back(1);
                     }
-                    Tensor<T> result(resultshape , input.device());
+                    Tensor<T> result(resultshape , false,  input.device());
                     int indim = input.ndim();
                     int reduce = inputshape[axis];
                     int inner = 1;
@@ -637,7 +973,7 @@ namespace nn{
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
                     auto inputshape = a.shape();
                     int indim = inputshape.size();
-                    Tensor<T> grad_in(inputshape , a.device());
+                    Tensor<T> grad_in(inputshape , false , a.device());
                     int reduce = inputshape[axis];
                     int inner = 1;
                     if(a.device() == Cuda){
@@ -678,7 +1014,7 @@ namespace nn{
                     if(input[0].requires_grad()){
                         a = input[0];
                     }
-                    Tensor<T> result(input[0].shape() , input[0].device());
+                    Tensor<T> result(input[0].shape() , false , input[0].device());
                     if( input[0].device() == Cuda){
                         _sigmoid_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(result.get() , input[0].get() , result.size());
                     }
@@ -687,12 +1023,12 @@ namespace nn{
                             result.get()[i] = 1 / (1 + nn_exp<T>(-input[0].get()[i]));
                         }
                     }
-                    output = result.deepcopy();
+                    output = result;
                     result.set_requires_grad(input[0].requires_grad());
                     return std::move(result);
                 }
                 std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) override{
-                    return {(grad_out * (output * (mytorch::ones<T>(output.shape() , output.device()) - output))).deepcopy()};
+                    return {(grad_out * (output * (mytorch::ones<T>(output.shape() , output.device()) - output)))};
                 }
                 std::vector<Tensor<T>> get_inputs() const override{
                     return {a};
@@ -894,7 +1230,7 @@ namespace nn{
                         a = input[0];
                     }
                     std::vector<int> newshape = _get_transpose_vec(input[0].shape() , perm);
-                    Tensor<T> result(newshape , input[0].device());
+                    Tensor<T> result(newshape , false , input[0].device());
                     result.set_requires_grad(input[0].requires_grad());
                     if(result.device() == Cuda){
                         if(ttype == TLast2Dim){
@@ -1019,7 +1355,7 @@ namespace nn{
                     //return {grad_out.transpose(_get_reverse_perm(perm))};
                     std::vector<int> revperm = _get_reverse_perm(perm);
                     std::vector<int> newshape = a.shape();
-                    Tensor<T> result(newshape , a.device());
+                    Tensor<T> result(newshape , false , a.device());
                     if(result.device() == Cuda){
                         TransposeType ttype;
                         int eq_count = 0;
@@ -1165,60 +1501,72 @@ namespace nn{
         };
 
 
-        template <typename T>
-        __global__ void _pool_forward_kernel(T * result , const T * input , int * mask ,int ndim ,  const int * kernel_shape , 
-            const int result_size ,  const int *  input_shape , const int * result_shape
-             , const int * input_strides){
-            int index = blockIdx.x * blockDim.x + threadIdx.x;
-            if(index >= result_size)
-                return;
-            int outidx[kCudaMultiDimMax];
-            int index_ = index;
-            for(int i = 0;i<ndim;i++){
-                outidx[i] = index_ % result_shape[ndim - i - 1];
-                index_ /= result_shape[ndim - i - 1];
-            }
-            CudaMultiDimIndex kernel_idx(kernel_shape , ndim);
-            do{
-                int inputindex = 0;
-                for(int i = 0;i<ndim;i++){
-                    inputindex += ((outidx[i] * kernel_shape[ndim - i - 1]) + kernel_idx[ndim - i - 1]) * input_strides[i];
-                }
-                if(result[index] < input[inputindex]){
-                    result[index] = input[inputindex];
-                    mask[index] = inputindex;
-                }
-                kernel_idx.next();
-            }while(!kernel_idx.is_zero());
-        }
+        template <typename T> 
+        __global__ void maxpool_gpu_2d_batch(
+            T * output , int * mask ,  const T * input , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep
+        );
 
         template <typename T>
-        __global__ void _maxpool2d_forward_kernel(T * result , const T * input , int * mask  ,  const int kh , const int kw , 
-            const int result_size ,  const int h , const int w , const int rh , const int rw){
-            int index = blockIdx.x * blockDim.x + threadIdx.x;
-            if(index >= result_size)
-                return;
-            int rhw = rh * rw;
-            int bid = index / rhw;
-            int r0 = (index / rw) % rh;
-            int r1 = index % rw;
-            int m0 = r0 * kh;
-            int m1 = r1 * kw;
-            int offset = m0 * w + m1 + h * w * bid;
-            T maxval = -FLT_MAX;
-            int maxindex;
-            for(int i = 0;i < kh ; i++){
-                for(int j = 0;j < kw;j++){
-                    int curindex = offset + i * w + j;
-                    if(maxval < input[curindex]){
-                        maxval = input[curindex];
-                        maxindex = curindex;
+        void maxpool_2d_batch(
+            T * output , int * mask ,  const T * input , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep, const Device device = DefaultDevice
+        ){
+            if(device == Cuda){
+                maxpool_gpu_2d_batch<T><<<CudaGetBlocks(n * batchsize) , kCudaThreadsNum>>>(
+                    output , mask , input , n,
+                    channels , height , width , kh , kw , 
+                    pad_h , pad_w,
+                    stride_h , stride_w,
+                    pooled_height , pooled_width,
+                    batchsize , inputbatchstep , outputbatchstep
+                );
+            }
+            else{
+                for(int i = 0;i < batchsize;i++){
+                    int inputbatchoffset = i * inputbatchstep;
+                    int outputbatchoffset = i * outputbatchstep;
+                    int index = 0;
+                    for(int c = 0;c<channels;c++){
+                     for(int w_p = 0;w_p<pooled_width;w_p++){
+                        for(int h_p = 0;h_p<pooled_height;h_p++){
+                            int wstart = w_p * stride_w - pad_w;
+                            int hstart = h_p * stride_h - pad_h;
+                            const int wend = min(wstart + kw , width);
+                            const int hend = min(hstart + kh , height);
+                            hstart = max(hstart , 0);
+                            wstart = max(wstart , 0);
+                            T maxval = -FLT_MAX;
+                            size_t maxidx = 0;
+                            const T * input_str = input + inputbatchoffset + c * height * width;
+                            for(int h = hstart;h<hend;h++){
+                                for(int w = wstart;w<wend;w++){
+                                    if(input_str[h * width + w] > maxval){
+                                        maxval = input_str[h * width + w];
+                                        maxidx = h * width + w;
+                                    }
+                                }
+                            }
+                            output[outputbatchoffset + index] = maxval;
+                            mask[outputbatchoffset + index] = maxidx + inputbatchoffset + c * height * width;
+                            index++;
+                        }
+                    }
+
                     }
                 }
             }
-            result[index] = maxval;
-            mask[index] = maxindex;
         }
+
+
         template <typename T>
         __global__ void _pool_backward_kernel(T * grad_in , const T * grad_out ,const int * mask , 
             const int result_size ){
@@ -1232,16 +1580,22 @@ namespace nn{
         template <typename T>
         class MaxPool2dFunc : public Function<T>{
             private:
-                int kh , kw;
+                int kh , kw , pad_h , pad_w , stride_h , stride_w;
                 int * mask;
                 int mask_size;
                 Tensor<T> a;
                 Device device;
             public:
-                MaxPool2dFunc(const std::vector<int> & kernel_shape , Device device) : kh(kernel_shape[0]) , kw(kernel_shape[1]) , device(device){ 
-                    mask = 0;
-                    mask_size = 0;
-                }
+                MaxPool2dFunc(const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 0 , const int stride_w = 0 , const Device device = DefaultDevice)
+                 : kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w)  , mask(0) , mask_size(0) , device(device){
+                    if(kh == 0 || kw == 0){
+                        std::cerr << "MaxPool2dFunc error! kh and kw must be greater than 0." << std::endl;
+                        throw std::runtime_error("PoolFunc error!");
+                    }
+                    this->stride_h = stride_h == 0 ? kh : stride_h;
+                    this->stride_w = stride_w == 0 ? kw : stride_w;
+                 }
+
                 Tensor<T> forward(const std::vector<Tensor<T>> & inputs){
                     auto input = inputs[0];
                     if(inputs.size() != 1){
@@ -1254,72 +1608,47 @@ namespace nn{
                     }
                     auto inputshape = input.shape();
                     int ndim = input.ndim();
+                    int channels = inputshape[ndim - 3];
                     int h = inputshape[ndim - 2];
                     int w = inputshape[ndim - 1];
-                    int rh = h / kh;
-                    int rw = w / kw;
+                    int pooled_height = (h - kh + 2 * pad_h) / stride_h + 1;
+                    int pooled_width = (w - kw + 2 * pad_w) / stride_w + 1;
                     std::vector<int> resultshape = inputshape;
-                    resultshape[ndim - 2] = rh;
-                    resultshape[ndim - 1] = rw;
+                    resultshape[ndim - 2] = pooled_height;
+                    resultshape[ndim - 1] = pooled_width;
                     Tensor<T> result(resultshape , false , device);
-                    if(device == Cuda){
-                        if(mask_size < result.size() * sizeof(int)){
+
+                    int batchsize = input.size() / (h * w * channels);
+                    int inputbatchstep = h * w * channels;
+                     int outputbatchstep = pooled_height * pooled_width * channels;
+
+                    if(mask_size < result.size()){
+                        mask_size = result.size();
+                        if(device == Cuda){
                             if(mask){
-                                CHECK(cudaFree(mask));
+                                cudaFree(mask);
                             }
-                            mask_size = result.size() * sizeof(int);
-                            CHECK(cudaMalloc(&mask , mask_size));
+                            cudaMalloc(&mask , mask_size * sizeof(int));
                         }
-                        _maxpool2d_forward_kernel<<<CudaGetBlocks(result.size()) , kCudaThreadsNum>>>(
-                            result.get(),
-                            input.get(),
-                            mask,
-                            kh,
-                            kw,
-                            result.size(),
-                            h,
-                            w,
-                            rh,rw
-                        );
-                    }
-                    else{
-                        if(mask_size < result.size() * sizeof(int)){
+                        else{
                             if(mask){
                                 delete [] mask;
                             }
-                            mask = new int[result.size()];
-                            mask_size = result.size() * sizeof(int);
+                            mask = new int[mask_size];
                         }
-                        int resultbatchstep = rh * rw , inputbatchstep = h * w;
-                        for(int resultbatchoffset = 0 , inputbatchoffset = 0;
-                            resultbatchoffset < result.size();
-                            resultbatchoffset += resultbatchstep , inputbatchoffset += inputbatchstep){
-                            for(int r0 = 0;r0 < rh;r0++){
-                                for(int r1 = 0;r1 < rw;r1++){
-                                    T maxval = -FLT_MAX;
-                                    int maxindex;
-                                    int rindex = resultbatchoffset + r0 * rw + r1;
-                                    for(int k0 = 0;k0 < kh;k0++){
-                                        for(int k1 = 0;k1 < kw;k1++){
-                                            int iindex = inputbatchoffset + ((r0 * kh) + k0) * w + (r1 * kw) + k1;
-                                            T val = input[iindex];
-                                            if(maxval < val){
-                                                maxval = val;
-                                                maxindex = iindex;
-                                            }
-                                        }
-                                    }
-                                    mask[rindex] = maxindex;
-                                    result[rindex] = maxval;
-                                }
-                            }
-                        }
-
                     }
+
+                    maxpool_2d_batch<T>(
+                        result.get() , mask , input.get(), pooled_height * pooled_width * channels,
+                        channels , h  , w , kh , kw , pad_h , pad_w , stride_h , stride_w,
+                        pooled_height , pooled_width , batchsize , inputbatchstep , outputbatchstep , device
+                    );
+
+
                     if(input.requires_grad()){
                         a = input;
                         result.set_requires_grad(true);
-                        }
+                    }
                     return std::move(result);
                 }
 
@@ -1336,6 +1665,7 @@ namespace nn{
                             int index = mask[i];
                             grad_in.get()[index] += grad_out.get()[i];
                         }
+                 
                     }
                     return {std::move(grad_in)};
                 }
@@ -1343,6 +1673,198 @@ namespace nn{
                     return {a};
                 }
 
+        };
+        template <typename T> 
+        __global__ void avgpool_forward_gpu_2d_batch(
+            T * output , const T * input , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep
+        );
+
+        template <typename T>
+        void avgpool_forward_2d_batch(
+            T * output , const T * input , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep , const Device device = DefaultDevice
+        ){
+            if(device == Cuda){
+                avgpool_forward_gpu_2d_batch<T><<<CudaGetBlocks(n * batchsize) , kCudaThreadsNum>>>(
+                    output , input , n,
+                    channels , height , width , kh , kw , 
+                    pad_h , pad_w,
+                    stride_h , stride_w,
+                    pooled_height , pooled_width,
+                    batchsize , inputbatchstep , outputbatchstep
+                );
+            }
+            else{
+                for(int i = 0;i < batchsize;i++){
+                    int inputbatchoffset = i * inputbatchstep;
+                    int outputbatchoffset = i * outputbatchstep;
+                    int index = 0;
+                    for(int c = 0;c<channels;c++){
+                     for(int w_p = 0;w_p<pooled_width;w_p++){
+                        for(int h_p = 0;h_p<pooled_height;h_p++){
+                            int wstart = w_p * stride_w - pad_w;
+                            int hstart = h_p * stride_h - pad_h;
+                            const int wend = min(wstart + kw , width);
+                            const int hend = min(hstart + kh , height);
+                            hstart = max(hstart , 0);
+                            wstart = max(wstart , 0);
+                            T sum = 0.0;
+                            const T * input_str = input + inputbatchoffset + c * height * width;
+                            for(int h = hstart;h<hend;h++){
+                                for(int w = wstart;w<wend;w++){
+                                    sum += input_str[h * width + w];
+                                }
+                            }
+                            output[outputbatchoffset + index] = sum / (T)(kh * kw);
+                        }
+                    }
+
+                    }
+                }
+            }
+        }
+
+        template <typename T> 
+        __global__ void avgpool_backward_gpu_2d_batch(
+            T * grad_input , const T * grad_output , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep
+        );
+
+        template <typename T> 
+        void avgpool_backward_2d_batch(
+            T * grad_input , const T * grad_output , const int n, // n for output
+            const int channels , const int height , const int width , const int kh , const int kw , 
+            const int pad_h , const int pad_w,
+            const int stride_h , const int stride_w,
+            const int pooled_height , const int pooled_width,
+            const int batchsize , const int inputbatchstep , const int outputbatchstep , const Device device = DefaultDevice
+        ){
+            if(device == Cuda){
+                avgpool_backward_gpu_2d_batch<T><<<CudaGetBlocks(n * batchsize) , kCudaThreadsNum>>>(
+                    grad_input , grad_output , n,
+                    channels , height , width , kh , kw , 
+                    pad_h , pad_w,
+                    stride_h , stride_w,
+                    pooled_height , pooled_width,
+                    batchsize , inputbatchstep , outputbatchstep
+                );
+            }
+            else{
+                for(int i = 0;i < batchsize;i++){
+                    int inputbatchoffset = i * inputbatchstep;
+                    int outputbatchoffset = i * outputbatchstep;
+                    int index = 0;
+                    for(int c = 0;c<channels;c++){
+                     for(int w_p = 0;w_p<pooled_width;w_p++){
+                        for(int h_p = 0;h_p<pooled_height;h_p++){
+                            int wstart = w_p * stride_w - pad_w;
+                            int hstart = h_p * stride_h - pad_h;
+                            const int wend = min(wstart + kw , width);
+                            const int hend = min(hstart + kh , height);
+                            hstart = max(hstart , 0);
+                            wstart = max(wstart , 0);
+                            T * input_str = grad_input + inputbatchoffset + c * height * width;
+                            const T grad = grad_output[outputbatchoffset + index] / (T)(kh * kw);
+                            for(int h = hstart;h<hend;h++){
+                                for(int w = wstart;w<wend;w++){
+                                    input_str[h * width + w] = grad;
+                                }
+                            }
+                        }
+                    }
+                        
+                    }
+                }
+            }
+        }
+
+        template <typename T>
+        class AvgPool2dFunc : public Function<T>{
+            private:
+                int kh , kw , pad_h , pad_w , stride_h , stride_w;
+                Tensor<T> a;
+                Device device;
+            public:
+                AvgPool2dFunc(const int kh , const int kw , const int pad_h , const int pad_w , const int stride_h , const int stride_w , const Device device = DefaultDevice)
+                    : kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h == 0 ? kh : stride_h) , stride_w(stride_w == 0 ? kw : stride_w) , device(device){}
+                
+                Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+                    auto input = inputs[0];
+                    if(inputs.size() != 1){
+                        std::cerr << "AvgPool2dFunc error! input size must be 1, but got " << inputs.size() << std::endl;
+                        throw std::runtime_error("PoolFunc error!");
+                    }
+                    if(input.device() != device){
+                        std::cerr << "AvgPool2dFunc error! input device must be the same." << std::endl;
+                        throw std::runtime_error("PoolFunc error!");
+                    }
+                    auto inputshape = input.shape();
+                    int ndim = input.ndim();
+                    int channels = inputshape[ndim - 3];
+                    int h = inputshape[ndim - 2];
+                    int w = inputshape[ndim - 1];
+                    int pooled_height = (h - kh + 2 * pad_h) / stride_h + 1;
+                    int pooled_width = (w - kw + 2 * pad_w) / stride_w + 1;
+                    std::vector<int> resultshape = inputshape;
+                    resultshape[ndim - 2] = pooled_height;
+                    resultshape[ndim - 1] = pooled_width;
+                    Tensor<T> result(resultshape , false , device);
+
+                    int batchsize = input.size() / (h * w * channels);
+                    int inputbatchstep = h * w * channels;
+                    int outputbatchstep = pooled_height * pooled_width * channels;
+
+                    avgpool_forward_2d_batch<T>(
+                        result.get()  , input.get(), pooled_height * pooled_width * channels,
+                        channels , h  , w , kh , kw , pad_h , pad_w , stride_h , stride_w,
+                        pooled_height , pooled_width , batchsize , inputbatchstep , outputbatchstep , device
+                    );
+
+                    if(input.requires_grad()){
+                        a = input;
+                        result.set_requires_grad(true);
+                    }
+                    return std::move(result);
+                }
+
+                std::vector<Tensor<T>> backward(const Tensor<T> & grad_out) {
+                    auto input = a;
+                    Tensor<T> grad_in(input.shape() , false , device);
+                    auto & inputshape = input.shape();
+                    int ndim = input.ndim();
+                    int h = inputshape[ndim - 2];
+                    int w = inputshape[ndim - 1];
+                    int channels = inputshape[ndim - 3];
+                    int batchsize = input.size() / (h * w * channels);
+                    int pooled_height = grad_out.shape()[ndim - 2];
+                    int pooled_width = grad_out.shape()[ndim - 1];
+                    int inputbatchstep = h * w * channels;
+                    int outputbatchstep = pooled_height * pooled_width * channels;
+
+                    avgpool_backward_2d_batch<T>(
+                        grad_in.get()  , grad_out.get(), pooled_height * pooled_width * channels,
+                        channels , h  , w , kh , kw , pad_h , pad_w , stride_h , stride_w,
+                        pooled_height , pooled_width , batchsize , inputbatchstep , outputbatchstep , device
+                    );
+                    return {grad_in};
+                }
+
+                std::vector<Tensor<T>> get_inputs() const override{
+                    return {a};
+                }
         };
         template <typename T>
         class ReshapeFunc : public Function<T>{
@@ -1411,7 +1933,7 @@ namespace nn{
                         cublasCreate(&handle);
                         float alpha = 1.0f;
                         float beta = 0.0f;
-                        CHECK_CUBLAS(cublasSgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                        CHECK_CUBLAS(cublasGemmStridedBatched<float>(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                             resultshape[resultshape.size() - 1] , 
                             resultshape[resultshape.size() - 2],
                             input0shape[input0shape.size() - 1] , 
@@ -1502,7 +2024,7 @@ namespace nn{
                         cublasCreate(&handle);
                         double alpha = 1.0f;
                         double beta = 0.0f;
-                        CHECK_CUBLAS(cublasDgemmStridedBatched(handle , CUBLAS_OP_N , CUBLAS_OP_N,
+                        CHECK_CUBLAS(cublasGemmStridedBatched<double>(handle , CUBLAS_OP_N , CUBLAS_OP_N,
                             resultshape[resultshape.size() - 1] , 
                             resultshape[resultshape.size() - 2],
                             input0shape[input0shape.size() - 1] , 
@@ -1614,7 +2136,6 @@ namespace nn{
             Tensor<T> input_cache; // internal backward
             cublasHandle_t handle;
             cudaStream_t streams[kStreamCount];
-            Tensor<T> weight_t;
             bool optimal =false;
         public:
             Tensor<T> weight;
@@ -1661,7 +2182,6 @@ namespace nn{
                 }
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-                weight_t = weight.transpose({1 , 0});
                 if(inputs.size() != 1){
                     throw std::runtime_error("Linear: input size must be 1");
                 }
@@ -1702,49 +2222,24 @@ namespace nn{
 
 
                     auto batch_size = result.size() / stepresult;
-
-                    if constexpr (std::is_same_v<T , float>){
-                        CHECK_CUBLAS(
-                            cublasSgemm_v2(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_N,
-                                resultshape.back(),
-                                batch_size,
-                                input0shape.back(),
-                                &alpha,
-                                weight_t.get(),
-                                resultshape.back(),
-                                inputget,
-                                input0shape.back(),
-                                &beta,
-                                resultget,
-                                resultshape.back()
-                            )
-                        );
-                    }
-                    else if constexpr (std::is_same_v<T , double>){
-                        CHECK_CUBLAS(
-                            cublasSgemm_v2(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_N,
-                                resultshape.back(),
-                                batch_size,
-                                input0shape.back(),
-                                &alpha,
-                                weight_t.get(),
-                                resultshape.back(),
-                                inputget,
-                                input0shape.back(),
-                                &beta,
-                                resultget,
-                                resultshape.back()
-                            )
-                        );
-                    }
-
-
+                    CHECK_CUBLAS(
+                        cublasGemm<T>(
+                            handle,
+                            CUBLAS_OP_T,
+                            CUBLAS_OP_N,
+                            resultshape.back(),
+                            batch_size,
+                            input0shape.back(),
+                            &alpha,
+                            weight.get(),
+                            input0shape.back(),
+                            inputget,
+                            input0shape.back(),
+                            &beta,
+                            resultget,
+                            resultshape.back()
+                        )
+                    );
                 }
                 else{
                     for(int  offset1 = 0 , offsetresult = 0;offsetresult < result.size(); offset1 += step1 , offsetresult += stepresult){
@@ -1768,7 +2263,7 @@ namespace nn{
             }
             std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
                 auto & input = input_cache;
-                Tensor<T> grad_input(input.shape() , input.device());
+                Tensor<T> grad_input(input.shape() , false , input.device());
                 Tensor<T> grad_weight = make_view(weight.get_grad() , weight.shape());
                 Tensor<T> grad_bias = make_view(bias.get_grad() , bias.shape());
                 auto inputstrides = input.get_strides();
@@ -1780,7 +2275,6 @@ namespace nn{
                 int batch_size = grad_out.size() / stepgradout;
 
                 const T * inputget = input.get();
-                const T * weighttget = weight_t.get();
                 const T * biasget = bias.get();
                 const T * gradoutget = grad_out.get();
                 T * gradinputget = grad_input.get();
@@ -1790,46 +2284,25 @@ namespace nn{
                 if(input.device() == Cuda){
                     T alpha = 1.0f;
                     T beta = 1.0f;
-                    if constexpr (std::is_same_v<T , float>){
-                        CHECK_CUBLAS(
-                            cublasSgemm_v2(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_T,
-                                stepinput,
-                                stepgradout,
-                                batch_size,
-                                &alpha,
-                                inputget,
-                                stepinput,
-                                gradoutget,
-                                stepgradout,
-                                &beta,
-                                gradweightget , 
-                                grad_weight.shape().back()
-                            )
-                        );
-                    }
-                    else if constexpr (std::is_same_v<T , double>){
-                        CHECK_CUBLAS(
-                            cublasDgemm_v2(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_T,
-                                stepinput,
-                                stepgradout,
-                                batch_size,
-                                &alpha,
-                                inputget,
-                                stepinput,
-                                gradoutget,
-                                stepgradout,
-                                &beta,
-                                gradweightget , 
-                                grad_weight.shape().back()
-                            )
-                        );
-                    }
+                    T beta0 = 0.0f;
+                    CHECK_CUBLAS(
+                        cublasGemm<T>(
+                            handle,
+                            CUBLAS_OP_N,
+                            CUBLAS_OP_T,
+                            stepinput,
+                            stepgradout,
+                            batch_size,
+                            &alpha,
+                            inputget,
+                            stepinput,
+                            gradoutget,
+                            stepgradout,
+                            &beta,
+                            gradweightget , 
+                            grad_weight.shape().back()
+                        )
+                    );
                     _linear_add_input_stride<T><<<CudaGetBlocks(grad_bias.size()) , kCudaThreadsNum>>>(
                         gradbiasget , 
                         gradoutget, 
@@ -1846,46 +2319,25 @@ namespace nn{
 
                     
                     auto batch_size = grad_out.size() / stepgradout;
-                    if constexpr (std::is_same_v<T , float>){
-                        CHECK_CUBLAS(
-                            cublasSgemm_v2(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_N,
-                                stepinput,
-                                batch_size,
-                                stepgradout,
-                                &alpha,
-                                weight.get(),
-                                weight.shape().back(),
-                                gradoutget,
-                                stepgradout,
-                                &beta,
-                                gradinputget,
-                                stepinput
-                            )
-                        );
-                    }
-                    else if constexpr (std::is_same_v<T , double>){
-                        CHECK_CUBLAS(
-                            cublasSgemm_v2(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_N,
-                                stepinput,
-                                batch_size,
-                                stepgradout,
-                                &alpha,
-                                weight.get(),
-                                weight.shape().back(),
-                                gradoutget,
-                                stepgradout,
-                                &beta,
-                                gradinputget,
-                                stepinput
-                            )
-                        );
-                    }
+                    CHECK_CUBLAS(
+                        cublasGemm<T>(
+                            handle,
+                            CUBLAS_OP_N,
+                            CUBLAS_OP_N,
+                            stepinput,
+                            batch_size,
+                            stepgradout,
+                            &alpha,
+                            weight.get(),
+                            weight.shape().back(),
+                            gradoutget,
+                            stepgradout,
+                            &beta0,
+                            gradinputget,
+                            stepinput
+                        )
+                    );
+                    
 
                 }
                 else{
@@ -1946,6 +2398,24 @@ namespace nn{
         const int stride_h , const int stride_w,
         const int height_col , const int width_col
     );
+    template <typename T , bool transpose = false> // transpose mode
+    __global__ void im2col_gpu_2d_batch(T * col , const T * im,
+        const int n, const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col ,
+         const int batchsize , const int imbatchstep , const int colbatchstep
+    );
+
+    template <typename T , bool transpose = false> // non transpose mode
+    __global__ void col2im_gpu_2d_batch(T * im , T * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col ,
+         const int batchsize , const int imbatchstep , const int colbatchstep
+    );
+
     template <typename T , bool trans = false>
     void im2col_2d(T * col , const T * im, const int n,  // n for col
         const int channels , const int height, const int width,
@@ -2009,6 +2479,34 @@ namespace nn{
 
         }
         }
+    }
+
+    template <typename T , bool trans = false>
+    void im2col_2d_batch(T * col , const T * im, const int n,  // n for col
+        const int channels , const int height, const int width,
+        const int kh, const int kw , const int pad_h , const int pad_w , 
+        const int stride_h , const int stride_w , 
+        const int height_col , const int width_col , const int batchsize , const int imbatchstep , const int colbatchstep , 
+        const Device device = Cuda
+    ){
+        if(device == Cuda){
+            im2col_gpu_2d_batch<T , trans><<<CudaGetBlocks(n * batchsize * kh * kw) , kCudaThreadsNum >>>(
+                col , im , n , channels , height ,  width , 
+                kh , kw , pad_h , pad_w , 
+                stride_h , stride_w , 
+                height_col , width_col,
+                batchsize , imbatchstep , colbatchstep
+            );
+        }
+        else{
+            for(int b = 0; b < batchsize; b++){ // just iteration
+                im2col_2d<T , trans>(
+                    col + b * colbatchstep , im + b * imbatchstep , n , channels , height , width ,
+                    kh , kw , pad_h , pad_w , stride_h , stride_w , height_col , width_col , device
+                );
+            }
+        }
+        
     }
 
     template <typename T , bool trans = false> // non transpose mode
@@ -2097,6 +2595,36 @@ namespace nn{
         }
     }
 
+    template <typename T , bool trans = false> // non transpose mode
+    void col2im_2d_batch(T * im , T * col , const int n, // n for im
+        const int channels , const int height , const int width,
+        const int kh , const int kw , const int pad_h , const int pad_w,
+        const int stride_h , const int stride_w,
+        const int height_col , const int width_col , const int batchsize , const int imbatchstep , const int colbatchstep,
+        const Device device = Cuda
+    ){
+        if(device == Cuda){
+            col2im_gpu_2d_batch<T , trans><<<CudaGetBlocks(n * batchsize) , kCudaThreadsNum >>>(
+                im , col , n  , channels , height ,  width , 
+                kh , kw , pad_h , pad_w , 
+                stride_h , stride_w , 
+                height_col , width_col , batchsize , imbatchstep , colbatchstep
+            );
+        }
+        else{
+            for(int b = 0; b < batchsize; b++){
+                col2im_2d<T , trans>(
+                    im + b * imbatchstep,
+                    col + b * colbatchstep,
+                    n,
+                    channels, height, width,
+                    kh, kw, pad_h, pad_w,
+                    stride_h, stride_w,
+                    height_col, width_col , device
+                );
+            }
+        }
+    }
 
 
     // kernels for n dim conv im2col and col2im
@@ -2107,13 +2635,13 @@ namespace nn{
         const T * grad_out , const int hw , const int c , const int size){
         // c for cout
         extern __shared__ char smem[];
-        double * bn_smem = reinterpret_cast<double *>(smem);
+        float * bn_smem = reinterpret_cast<float *>(smem);
         int tid = threadIdx.x;
         int cid = blockIdx.x;
         int warpId = tid / 32;
         int laneId = tid % 32;
         constexpr int warpsPerBlock = kCudaThreadsNum / 32;
-        double sum = 0;
+        float sum = 0;
         int chw = c * hw; // fan_out
         for(int offset = cid * hw;offset < size; offset += chw){
             for(int i = tid;i < hw;i += kCudaThreadsNum){
@@ -2125,13 +2653,151 @@ namespace nn{
         __syncthreads();
         if(tid < warpsPerBlock){
             sum = bn_smem[tid];
-            sum = warpReduceSum<double>(sum);
+            sum = warpReduceSum<T>(sum);
             if(tid == 0){
                 grad_bias[cid] = sum;
             }
         }
     }
 
+    __global__ void implSgemm( float * output , const float * input ,const float * weight ,const float * bias,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+    __global__ void implDgemm( double * output , const double * input ,const double * weight ,const double * bias,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+
+    template <typename T>
+    void conv2d_forward_gpu( T * output , const T * input ,const T * weight ,const T * bias,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        int blockx = ((oh * ow + 127) / 128);
+        int blocky = ((k + 127) / 128);
+        int blockz = n;
+
+        int threadx = 256;
+        int thready = 1;
+        int threadz = 1;
+        dim3 block(threadx , thready , threadz);
+        dim3 grid(blockx , blocky , blockz);
+        if constexpr (std::is_same_v<T , float>){
+            implSgemm<<<grid , block>>>(
+                output , input , weight , bias,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+        else if constexpr (std::is_same_v<T , double>){
+            implDgemm<<<grid , block>>>(
+                output , input , weight , bias,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+    }
+
+    __global__ void implSgemmgradinput( float * gradinput , const float * gradout ,const float * weight ,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+    __global__ void implDgemmgradinput( double * gradinput , const double * gradout ,const double * weight ,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+
+    template <typename T>
+    void implGemmgradinput( T * gradinput , const T * gradout ,const T * weight ,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        int blockx = ((h * w + 127) / 128);
+        int blocky = (c + 127) / 128;
+        int blockz = n;
+
+        int threadx = 256;
+        int thready = 1;
+        int threadz = 1;
+        dim3 block(threadx , thready , threadz);
+        dim3 grid(blockx , blocky , blockz);
+        if constexpr (std::is_same_v<T , float>){
+            implSgemmgradinput<<<grid , block>>>(
+                gradinput , gradout , weight ,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+        else if constexpr (std::is_same_v<T , double>){
+            implDgemmgradinput<<<grid , block>>>(
+                gradinput , gradout , weight ,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+
+        }
+    }
+
+    __global__ void implSgemmgradweight(float * gradweight , const float * input , const float * gradout,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+    __global__ void implDgemmgradweight(double * gradweight , const double * input , const double * gradout,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+
+    template <typename T>
+    void implGemmgradweight(T * gradweight , const T * input , const T * gradout,
+        const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        int blockx = (kh * kw + 127) / 128;
+        int blocky = (k + 127) / 128;
+        int blockz = c;
+
+        int threadx = 256;
+        int thready = 1;
+        int threadz = 1;
+
+        dim3 block(threadx , thready , threadz);
+        dim3 grid(blockx , blocky , blockz);
+
+        if constexpr (std::is_same_v<T , float>){
+            implSgemmgradweight<<<grid , block>>>(
+                gradweight , input , gradout,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+        else if (std::is_same_v<T , double>){
+            implDgemmgradweight<<<grid , block>>>(
+                gradweight , input , gradout,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+    }
+
+
+
+    // conv2d class
     template <typename T>
     class Conv2d : public Module<T>{
         private:
@@ -2148,13 +2814,14 @@ namespace nn{
             T * buf;
             int buf_size;
             cublasHandle_t handle;
-            cudaStream_t streams[kStreamCount];
+            cudaStream_t stream_bias , stream_weight;
+            bool use_impl , use_cache;
         public:
             Tensor<T> kernel;
             Tensor<T> bias;
             Conv2d(const int in_channels , const int out_channels ,
-                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice) : 
-                 device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels){
+                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice , const bool use_impl = true) : 
+                 device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl){
                 if(kh % 2 == 0 || kw % 2 == 0){
                     std::cerr << "Conv2d: kernel size must be odd" << std::endl;
                     throw std::runtime_error("Conv2d: kernel size must be odd");
@@ -2166,12 +2833,11 @@ namespace nn{
                 buf = 0;
                 buf_size = 0;
                 if(device == Cuda){
+                    CHECK(cudaStreamCreate(&stream_bias));
+                    CHECK(cudaStreamCreate(&stream_weight));
                     CHECK_CUBLAS(
                         cublasCreate(&handle)
                     );
-                    for(int i = 0;i < kStreamCount;i++){
-                        CHECK(cudaStreamCreate(&streams[i]));
-                    }
                 }
             }
             ~Conv2d(){
@@ -2184,12 +2850,11 @@ namespace nn{
                     }
                 }
                 if(device == Cuda){
+                    CHECK(cudaStreamDestroy(stream_bias));
+                    CHECK(cudaStreamDestroy(stream_weight));
                     CHECK_CUBLAS(
                         cublasDestroy(handle)
                     );
-                    for(int i = 0;i < kStreamCount;i++){
-                        CHECK(cudaStreamDestroy(streams[i]));
-                    }
                 }
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
@@ -2222,93 +2887,121 @@ namespace nn{
 
                 Tensor<T> result({b , out_channels , height_col , width_col} , false , device);
                 int resultcoutstep = height_col * width_col;
-                int resultbatchstep = resultcoutstep * out_channels , inputbatchstep = h * w * in_channels;
+                int inputbatchstep = h * w * in_channels;
                 int n = in_channels * resultcoutstep;
                 T * resultget = result.get();
                 const T * inputget = input.get();
                 T * kernelget = kernel.get();
                 const int resultsize = result.size();
+                bool is_1x1_ = kh == 1 && kw == 1 && stride_h == 1 && stride_w == 1 && pad_h == 0 && pad_w == 0;
 
                 if(device == Cuda){
-                    if(buf_size < resultcoutstep * ckernelsize * b ){
-                        if(buf){
-                            CHECK(cudaFree(buf));
-                        }
-                        buf_size = resultcoutstep * ckernelsize * b;
-                        CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
-                    }
-                    _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
-                        resultget , bias.get() , resultsize , resultcoutstep , out_channels
-                    );
-                    for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0
-                        ; resultbatchoffset < resultsize
-                        ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
-                        im2col_2d<T , false>(buf + i * resultcoutstep * ckernelsize, inputget + inputbatchoffset,
-                            n, in_channels, h , w,
-                            kh , kw , pad_h , pad_w , stride_h , stride_w,
-                            height_col , width_col,device , streams[i % kStreamCount]
+                    if(is_1x1_){ // no need to im2col
+                            _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
+                                resultget , bias.get() , resultsize , resultcoutstep , out_channels
+                            );
+                        CHECK_CUBLAS(
+                            cublasGemmStridedBatched<T>(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_N,
+                                resultcoutstep,
+                                out_channels,
+                                ckernelsize,
+                                &alpha1,
+                                inputget,
+                                resultcoutstep,
+                                ckernelsize * resultcoutstep,
+                                kernelget,
+                                ckernelsize,
+                                0,
+                                &beta1,
+                                resultget,
+                                resultcoutstep,
+                                resultcoutstep * out_channels,
+                                b
+                            )
                         );
                     }
-                    for(int i = 0;i < kStreamCount;i++){
-                        CHECK(cudaStreamSynchronize(streams[i]));
+                    else{
+                        if(buf_size < resultcoutstep * ckernelsize * b  && !use_impl){
+                            if(buf){
+                                CHECK(cudaFree(buf));
+                            }
+                            buf_size = resultcoutstep * ckernelsize * b;
+                            CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
+                        }
+                        if(use_impl){
+                            conv2d_forward_gpu<T>(resultget , inputget , kernelget , bias.get(),
+                            b , in_channels , h , w , out_channels , kh , kw , pad_h , pad_w, stride_h , stride_w , height_col , width_col
+                        );
+                        }
+                        else{
+                            _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
+                                resultget , bias.get() , resultsize , resultcoutstep , out_channels
+                            );
+                            im2col_2d_batch<T , false>(buf, inputget,
+                                n, in_channels, h , w,
+                                kh , kw , pad_h , pad_w , stride_h , stride_w,
+                                height_col , width_col , b , inputbatchstep , resultcoutstep * ckernelsize
+                            );
+                            CHECK_CUBLAS(
+                                cublasGemmStridedBatched<T>(
+                                    handle,
+                                    CUBLAS_OP_T,
+                                    CUBLAS_OP_N,
+                                    resultcoutstep,
+                                    out_channels,
+                                    ckernelsize,
+                                    &alpha1,
+                                    buf,
+                                    ckernelsize,
+                                    ckernelsize * resultcoutstep,
+                                    kernelget,
+                                    ckernelsize,
+                                    0,
+                                    &beta1,
+                                    resultget,
+                                    resultcoutstep,
+                                    resultcoutstep * out_channels,
+                                    b
+                                )
+                            );
+
+                        }
+
                     }
-                    CHECK_CUBLAS(
-                        cublasSgemmStridedBatched(
-                            handle,
-                            CUBLAS_OP_T,
-                            CUBLAS_OP_N,
-                            resultcoutstep,
-                            out_channels,
-                            ckernelsize,
-                            &alpha1,
-                            buf,
-                            ckernelsize,
-                            ckernelsize * resultcoutstep,
-                            kernelget,
-                            ckernelsize,
-                            0,
-                            &beta1,
-                            resultget,
-                            resultcoutstep,
-                            resultcoutstep * out_channels,
-                            b
-                        )
-                    );
                 }
                 else{
-                    if(buf_size < resultcoutstep * ckernelsize){
+                    if(buf_size < resultcoutstep * ckernelsize * b){
                         if(buf){
                             delete [] buf;
                         }
-                        buf_size = resultcoutstep * ckernelsize;
+                        buf_size = resultcoutstep * ckernelsize * b;
                         buf = new T[buf_size];
                     }
                     for(int i = 0;i < resultsize;i++){
                         resultget[i] = bias.get()[(i / resultcoutstep) % out_channels];
                     }
-                    for(int inputbatchoffset = 0 , resultbatchoffset = 0
-                        ; resultbatchoffset < result.size()
-                        ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-
-                        im2col_2d<T , false>(buf , inputget + inputbatchoffset,
-                            n, in_channels, h , w,
-                            kh , kw , pad_h , pad_w , stride_h , stride_w,
-                            height_col , width_col,device
-                        );
-
-                        for(int kernelcoutoffset = 0 , resultcoutoffset = 0;
-                        kernelcoutoffset < kernel.size();
-                        kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
-                            for(int i = 0; i < resultcoutstep;i++){
-                                T sum = 0;
-                                for(int k = 0;k < ckernelsize;k++){
-                                    sum += buf[i * ckernelsize + k] * kernelget[kernelcoutoffset + k];
-                                }
-                                resultget[resultbatchoffset + resultcoutoffset + i] += sum;
-                            }
-                        }
-
-                    }
+                    im2col_2d_batch<T , false>(buf, inputget,
+                        n, in_channels, h , w,
+                        kh , kw , pad_h , pad_w , stride_h , stride_w,
+                        height_col , width_col , b , inputbatchstep , resultcoutstep * ckernelsize, Cpu
+                    );
+                    __cpu_gemm_strided_batch<T , false , true>(
+                        out_channels,
+                        resultcoutstep,
+                        ckernelsize,
+                        kernelget, // cout , ckernelsize
+                        0,
+                        buf, // b , resultcoutstep , ckernelsize
+                        resultcoutstep * ckernelsize,
+                        resultget,
+                        resultcoutstep * out_channels,
+                        1,
+                        1,
+                        b
+                    );
 
                 }
                 if (input.requires_grad()){
@@ -2337,12 +3030,11 @@ namespace nn{
 
                 int resultcoutstep = height_col * width_col;
                 int resultbatchstep = resultcoutstep * out_channels , inputbatchstep = h * w * in_channels;
-                const int im2col_n = resultcoutstep * in_channels;
                 const int col2im_n = h * w * in_channels;
 
                 Tensor<T> grad_kernel = make_view(kernel.get_grad() , kernel.shape());
                 Tensor<T> grad_bias = make_view(bias.get_grad() , bias.shape());
-                Tensor<T> grad_in(input.shape() , device);
+                Tensor<T> grad_in(input.shape() , false , device);
 
                 const T * inputget = input.get();
                 const T * gradoutget = grad_out.get();
@@ -2362,7 +3054,7 @@ namespace nn{
                                 resultbatchoffset < gradoutsize;
                             inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
                             CHECK_CUBLAS(
-                                cublasSgemm_v2(
+                                cublasGemm<T>(
                                     handle,
                                     CUBLAS_OP_T,
                                     CUBLAS_OP_N,
@@ -2384,62 +3076,101 @@ namespace nn{
 
                     }
                     else{
-                        for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
-                                resultbatchoffset < gradoutsize;
-                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
+                        if(use_impl){
+                            if(buf_size < resultcoutstep * ckernelsize){
+                                if(buf){
+                                    CHECK(cudaFree(buf));
+                                }
+                                buf_size = resultcoutstep * ckernelsize;
+                                CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
+                            }
+                            cublasSetStream(handle , stream_weight);
+                            for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
+                                    resultbatchoffset < gradoutsize;
+                                inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
 
-                            CHECK_CUBLAS(
-                                cublasSgemm_v2(
-                                    handle,
-                                    CUBLAS_OP_N,
-                                    CUBLAS_OP_N,
-                                    ckernelsize,
-                                    out_channels,
-                                    resultcoutstep,
-                                    &alpha1,
-                                    buf + i * ckernelsize * resultcoutstep,
-                                    ckernelsize,
-                                    gradoutget + resultbatchoffset,
-                                    resultcoutstep,
-                                    &beta1,
-                                    gradkernelget,
-                                    ckernelsize
-                                )
-                            );
+                                im2col_2d<T , false>(buf , inputget + inputbatchoffset,
+                                    in_channels * resultcoutstep, in_channels, h , w,
+                                    kh , kw , pad_h , pad_w , stride_h , stride_w,
+                                    height_col , width_col,device , stream_weight
+                                );
+
+
+                                CHECK_CUBLAS(
+                                    cublasGemm<T>(
+                                        handle,
+                                        CUBLAS_OP_N,
+                                        CUBLAS_OP_N,
+                                        ckernelsize,
+                                        out_channels,
+                                        resultcoutstep,
+                                        &alpha1,
+                                        buf,
+                                        ckernelsize,
+                                        gradoutget + resultbatchoffset,
+                                        resultcoutstep,
+                                        &beta1,
+                                        gradkernelget,
+                                        ckernelsize
+                                    )
+                                );
+                            }
+                        }
+                        else{
+
+                            for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
+                                    resultbatchoffset < gradoutsize;
+                                inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
+
+
+                                CHECK_CUBLAS(
+                                    cublasGemm<T>(
+                                        handle,
+                                        CUBLAS_OP_N,
+                                        CUBLAS_OP_N,
+                                        ckernelsize,
+                                        out_channels,
+                                        resultcoutstep,
+                                        &alpha1,
+                                        buf + i * ckernelsize * resultcoutstep,
+                                        ckernelsize,
+                                        gradoutget + resultbatchoffset,
+                                        resultcoutstep,
+                                        &beta1,
+                                        gradkernelget,
+                                        ckernelsize
+                                    )
+                                );
+                            }
+
+
                         }
 
                     }
                 }
                 else{
 
-                    for(int inputbatchoffset = 0 , resultbatchoffset = 0
+                    for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0
                         ; resultbatchoffset < gradoutsize
-                        ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-
-                        im2col_2d<T , true>(buf , inputget + inputbatchoffset, im2col_n,
-                            in_channels , h , w , 
-                            kh , kw , pad_h , pad_w , 
-                            stride_h , stride_w , height_col , width_col, device
+                        ; inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
+                        __cpu_gemm<T , false , false>(
+                            out_channels,
+                            ckernelsize,
+                            resultcoutstep,
+                            gradoutget + resultbatchoffset,
+                            buf + i * ckernelsize * resultcoutstep,
+                            gradkernelget ,
+                            1,
+                            1
                         );
-
-                        for(int kernelcoutoffset = 0 , resultcoutoffset = 0;
-                        kernelcoutoffset < kernel.size();
-                        kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
-                            for(int i = 0; i < ckernelsize;i++){
-                                T sum = 0;
-                                for(int k = 0;k < resultcoutstep;k++){
-                                    sum += buf[i * resultcoutstep + k] * gradoutget[resultcoutoffset + k + resultbatchoffset];
-                                }
-                                gradkernelget[kernelcoutoffset + i] += sum;
-                            }
-                        }
                     }
 
 
                 }
 
+
                 if(device == Cuda){
-                    _conv_bias_backward<<< out_channels , kCudaThreadsNum , kCudaThreadsNum / 32 * sizeof(double)>>>(
+                    _conv_bias_backward<<< out_channels , kCudaThreadsNum , kCudaThreadsNum / 32 * sizeof(float) , stream_bias>>>(
                         gradbiasget,
                         gradoutget,
                         resultcoutstep,
@@ -2461,8 +3192,9 @@ namespace nn{
                 }
                 if(device == Cuda){
                     if(is_1x1_){
+                        cublasSetStream(handle , stream_weight);
                         CHECK_CUBLAS(
-                            cublasSgemmStridedBatched(
+                            cublasGemmStridedBatched<T>(
                                 handle,
                                 CUBLAS_OP_N,
                                 CUBLAS_OP_T,
@@ -2487,40 +3219,8 @@ namespace nn{
                     }
                     else{
 
-                        CHECK_CUBLAS(
-                            cublasSgemmStridedBatched(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_T,
-                                ckernelsize,
-                                resultcoutstep,
-                                out_channels,
-                                &alpha1,
-                                kernelget,
-                                ckernelsize,
-                                0,
-                                gradoutget,
-                                resultcoutstep,
-                                resultcoutstep * out_channels,
-                                &beta0,
-                                buf,
-                                ckernelsize,
-                                ckernelsize * resultcoutstep,
-                                b
-                            )
-                        );
-                        for(int inputbatchoffset = 0 , resultbatchoffset = 0 , i = 0;
-                            resultbatchoffset < gradoutsize;
-                            inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep , i++){
-                            
-                            col2im_2d<T,false>(gradinget + inputbatchoffset , buf + i * ckernelsize * resultcoutstep , col2im_n,
-                                in_channels , h , w , kh , kw , 
-                                pad_h , pad_w , stride_h , stride_w , height_col , width_col , device , streams[i % kStreamCount]);
-
-                        }
-                        for(int i = 0;i < kStreamCount;i++){
-                            CHECK(cudaStreamSynchronize(streams[i]));
-                        }
+                        implGemmgradinput<T>(gradinget , gradoutget  , kernelget , b , in_channels , 
+                        h , w , out_channels , kh , kw , pad_h , pad_w , stride_h , stride_w , height_col , width_col);
 
                     }
 
@@ -2528,34 +3228,539 @@ namespace nn{
 
                 }
                 else{
-                    for(int inputbatchoffset = 0 , resultbatchoffset = 0;
-                        resultbatchoffset < gradoutsize;
-                        inputbatchoffset += inputbatchstep , resultbatchoffset += resultbatchstep){
-                        for(int kernelcoutoffset = 0, resultcoutoffset = 0;
-                            kernelcoutoffset < kernel.size();
-                            kernelcoutoffset += ckernelsize, resultcoutoffset += resultcoutstep){
-                            
-                            if(kernelcoutoffset == 0){
-                                for(int i = 0; i < resultcoutstep;i++){
-                                    for(int k = 0;k < ckernelsize;k++){
-                                        buf[i * ckernelsize + k] = gradoutget[resultbatchoffset + resultcoutoffset + i] * kernelget[kernelcoutoffset + k];
-                                    }
-                                }
-                            }
-                            else{
-                                for(int i = 0; i < resultcoutstep;i++){
-                                    for(int k = 0;k < ckernelsize;k++){
-                                        buf[i * ckernelsize + k] += gradoutget[resultbatchoffset + resultcoutoffset + i] * kernelget[kernelcoutoffset + k];
-                                    }
-                                }
-                            }
-                        }
 
-                        col2im_2d<T,false>(gradinget + inputbatchoffset , buf , col2im_n,
-                            in_channels , h , w , kh , kw , 
-                            pad_h , pad_w , stride_h , stride_w , height_col , width_col , device);
+                    __cpu_gemm_strided_batch<T , true , false>(
+                        resultcoutstep,
+                        ckernelsize,
+                        out_channels,
+                        gradoutget,
+                        out_channels * resultcoutstep,
+                        kernelget,
+                        0,
+                        buf,
+                        resultcoutstep * ckernelsize,
+                        1,
+                        0,
+                        b
+                    );
+                    col2im_2d_batch<T,false>(gradinget, buf , col2im_n,
+                        in_channels , h , w , kh , kw , 
+                        pad_h , pad_w , stride_h , stride_w , height_col , width_col , b , inputbatchstep , ckernelsize * resultcoutstep , device);
+
+
+                }
+
+
+                return {grad_in};
+            }
+
+            std::vector<Tensor<T>> parameters() override{
+                return {kernel , bias};
+            }
+
+    };
+
+    template <typename T>
+    __global__ void __make_kernel_buf(T * buf , const T * kernel ,const int size ,const int kernelsize){
+        int index = threadIdx.x + blockIdx.x * blockDim.x;
+        if(index < size){
+            buf[index] = kernel[index % kernelsize];
+        }
+    }
+
+    // conv2d with group
+    // input : b , cin , ih , iw => b , g , cin/g , ih , iw
+    // buf : b , h*w , g , cin/g * kh * kw
+    // kernel : cout/g , g , (cin/g , kh , kw)
+    // \|/
+    // output : b , g , cout/g , h , w
+
+    // BACKWARD:
+    // gradout : b , g , cout/g , h * w
+    // buf : b , g , h*w , cin/g * kh * kw
+    // \|/
+    // gradkernel : g , cout/g , (cin/g , kh , kw)
+
+    // gradout : b , g , cout/g , h , w
+    // kernel : g , cout/g , (cin/g , kh , kw)
+    // \|/
+    // buf : b , g , h*w , cin/g * kh * kw
+    // gradin : b , cin , ih , iw => b , g ,  cin/g , ih , iw
+
+    // gradout : b , (g * cout/g) , h * w
+    // gradbias : g * cout/g
+
+
+    __global__ void implSgemmgroup( float * output , const float * input ,const float * weight_ ,const float * bias,
+        const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+
+    template <typename T>
+    void groupconv2d_forward_gpu( T * output , const T * input ,const T * weight ,const T * bias,
+        const int n , const int c , const int h , const int w, const int g, const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        int blockx = ((oh * ow + 127) / 128);
+        int blocky = ((k + 127) / 128);
+        int blockz = n;
+
+        int threadx = 256;
+        int thready = 1;
+        int threadz = 1;
+        dim3 block(threadx , thready , threadz);
+        dim3 grid(blockx , blocky , blockz);
+        if constexpr (std::is_same_v<T , float>){
+            implSgemmgroup<<<grid , block>>>(
+                output , input , weight , bias,
+                n , c , h , w, g, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+        else if constexpr (std::is_same_v<T , double>){ 
+            // need to implement
+            implDgemm<<<grid , block>>>(
+                output , input , weight , bias,
+                n , c , h , w, k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+    }
+
+
+    template <typename T>
+    void implGemmgradinput( T * gradinput , const T * gradout ,const T * weight ,
+        const int n , const int c , const int h , const int w, const int g , const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        int blockx = ((h * w + 127) / 128);
+        int blocky = (c + 127) / 128;
+        int blockz = n;
+
+        int threadx = 256;
+        int thready = 1;
+        int threadz = 1;
+        dim3 block(threadx , thready , threadz);
+        dim3 grid(blockx , blocky , blockz);
+        if constexpr (std::is_same_v<T , float>){
+            implSgemmgradinputgroup<<<grid , block>>>(
+                gradinput , gradout , weight ,
+                n , c , h , w, g , k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+        }
+        else if constexpr (std::is_same_v<T , double>){
+            // need to implement
+            implDgemmgradinput<<<grid , block>>>(
+                gradinput , gradout , weight ,
+                n , c , h , w , k , kh , kw , 
+                pad_h , pad_w , stride_h , stride_w,
+                oh , ow
+            );
+
+        }
+    }
+
+
+
+
+    template <typename T>
+    class GroupConv2d : public Module<T>{
+        private:
+            Tensor<T> input_cache;
+            Device device;
+            int in_channels;
+            int groupcin;
+            int out_channels;
+            int groupcout;
+            int kh;
+            int kw;
+            int pad_h;
+            int pad_w;
+            int stride_h;
+            int stride_w;
+            int groups;
+            T * buf;
+            int buf_size;
+            T * kernel_buf;
+            int kernel_buf_size;
+            cublasHandle_t handle;
+            cudaStream_t stream_bias;
+        public:
+            Tensor<T> kernel;
+            Tensor<T> bias;
+            GroupConv2d(const int groups , const int in_channels , const int out_channels ,
+                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice) : 
+                 groups(groups) , device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels){
+                if(kh % 2 == 0 || kw % 2 == 0){
+                    std::cerr << "GroupConv2d: kernel size must be odd" << std::endl;
+                    throw std::runtime_error("GroupConv2d: kernel size must be odd");
+                }
+                groupcin = in_channels / groups;
+                groupcout = out_channels / groups;
+                int fan_in = groupcin * kh * kw;
+                T inv = nn_rsqrt<T>(fan_in);
+                kernel = rand<T>({groups , groupcout , groupcin , kh , kw} , device) * 2 * inv  - inv;
+                bias = rand<T>({out_channels} , device) * 2 * inv - inv;
+                buf = 0;
+                buf_size = 0;
+                kernel_buf = 0;
+                kernel_buf_size = 0;
+                if(device == Cuda){
+                    CHECK_CUBLAS(
+                        cublasCreate(&handle)
+                    );
+                    CHECK(
+                        cudaStreamCreate(&stream_bias)
+                    );
+                }
+            }
+            ~GroupConv2d(){
+                if(buf){
+                    if(device == Cuda){
+                        CHECK(cudaFree(buf));
+                    }
+                    else{
+                        delete [] buf;
                     }
                 }
+                if(device == Cuda){
+                    CHECK_CUBLAS(
+                        cublasDestroy(handle)
+                    );
+                    CHECK(
+                        cudaStreamDestroy(stream_bias)
+                    );
+                }
+            }
+
+            Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+                auto input = inputs[0];
+                if(input.ndim() != 4){
+                    std::cerr << "GroupConv2d: input must be 4D" << std::endl;
+                    throw std::runtime_error("GroupConv2d: input must be 4D");
+                }
+                if(input.shape()[1] != in_channels){
+                    std::cerr << "GroupConv2d: input and kernel must have the same number of input channels:"
+                        << input.shape()[1] << " != " << in_channels
+                     << std::endl;
+                    throw std::runtime_error("GroupConv2d: input and kernel must have the same number of input channels");
+                }
+                if(input.device() != device){
+                    std::cerr << "GroupConv2d: input and kernel must be on the same device" << std::endl;
+                    throw std::runtime_error("GroupConv2d: input and kernel must be on the same device");
+                }
+                if(input.requires_grad()){
+                    input_cache = input;
+                }
+                const int b = input.shape()[0];
+                const int h = input.shape()[2];
+                const int w = input.shape()[3];
+                
+                T alpha1 = 1.0 , beta1 = 1.0;
+                int height_col = (h + 2 * pad_h -  kh  ) / stride_h + 1;
+                int width_col = (w + 2 * pad_w - kw) / stride_w + 1;
+                int ckernelsize = kh * kw * groupcin;
+
+                Tensor<T> result({b , out_channels , height_col , width_col} , false , device);
+                int n = groupcin * height_col * width_col;
+                T * resultget = result.get();
+                const T * inputget = input.get();
+                T * kernelget = kernel.get();
+                const int resultsize = result.size();
+
+                if(device == Cuda){
+
+                    if(buf_size < b * groups * height_col * width_col * ckernelsize ){
+                        if(buf){
+                            CHECK(cudaFree(buf));
+                        }
+                        buf_size = b * groups * height_col * width_col * ckernelsize;
+                        CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
+                    }
+                    if(kernel_buf_size < b * kernel.size()){
+                        if(kernel_buf){
+                            CHECK(cudaFree(kernel_buf));
+                        }
+                        kernel_buf_size = b * kernel.size();
+                        CHECK(cudaMalloc(&kernel_buf , kernel_buf_size * sizeof(T) ));
+                    }
+                    _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
+                        resultget , bias.get() , resultsize , height_col * width_col , out_channels
+                    );
+                    im2col_2d_batch<T , false>(buf, inputget,
+                        n, groupcin, h , w,
+                        kh , kw , pad_h , pad_w , stride_h , stride_w,
+                        height_col , width_col , b * groups , groupcin * h * w , height_col * width_col * ckernelsize
+                    );
+
+                    __make_kernel_buf<T><<<CudaGetBlocks(kernel_buf_size) , kCudaThreadsNum >>>(
+                        kernel_buf , kernelget , kernel_buf_size , kernel.size()
+                    );
+                    CHECK_CUBLAS(
+                        cublasGemmStridedBatched<T>(
+                            handle,
+                            CUBLAS_OP_T,
+                            CUBLAS_OP_N,
+                            height_col * width_col,
+                            groupcout,
+                            ckernelsize,
+                            &alpha1,
+                            buf,
+                            ckernelsize,
+                            ckernelsize * height_col * width_col,
+                            kernel_buf, // g , cout/g , ckernelsize
+                            ckernelsize,
+                            groupcout * ckernelsize,
+                            &beta1,
+                            resultget,
+                            height_col * width_col,
+                            height_col * width_col * groupcout,
+                            groups * b
+                        )
+                    );
+
+                }
+                else{
+                    if(buf_size < b * groups * height_col * width_col * ckernelsize ){
+                        if(buf){
+                            delete [] buf;
+                        }
+                        buf_size = b * groups * height_col * width_col * ckernelsize;
+                        buf = new T[buf_size];
+                    }
+                    for(int i = 0;i < resultsize;i++){
+                        resultget[i] = bias.get()[(i / (height_col * width_col)) % out_channels];
+                    }
+                    im2col_2d_batch<T , false>(buf, inputget,
+                        n, groupcin, h , w,
+                        kh , kw , pad_h , pad_w , stride_h , stride_w,
+                        height_col , width_col , b * groups , groupcin * h * w , height_col * width_col * ckernelsize , Cpu
+                    );
+                    // input : b , cin , ih , iw => b , g , cin/g , ih , iw
+                    // buf : b , g , h*w , cin/g * kh * kw
+                    // kernel : g , cout/g , (cin/g , kh , kw)
+                    // \|/
+                    // output : b , g , cout/g , h , w
+
+                    for(int i = 0;i < b;i++){
+                        __cpu_gemm_strided_batch<T , false , true>(
+                            groupcout,
+                            height_col * width_col,
+                            ckernelsize,
+                            kernelget,
+                            ckernelsize * groupcout,
+                            buf + i * groups * height_col * width_col * ckernelsize,
+                            height_col * width_col * ckernelsize,
+                            resultget + i * groups * groupcout * height_col * width_col,
+                            groupcout * height_col * width_col,
+                            1,
+                            1,
+                            groups
+                        );
+                    }
+
+                }
+                if (input.requires_grad()){
+                    result.set_requires_grad(true);
+                    result.set_grad_fn(
+                        std::make_shared<Functional::ModuleFunctionWrapper<T>>(this , input)
+                    );
+                }
+                return std::move(result);
+
+
+            }
+
+        
+        
+            std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
+                // BACKWARD:
+
+                // gradout : b , g , cout/g , h , w
+                // kernel : g , cout/g , (cin/g , kh , kw)
+                // \|/
+                // buf : b , g , h*w , cin/g * kh * kw
+                // gradin : b , cin , ih , iw => b , g ,  cin/g , ih , iw
+
+                // gradout : b , (g * cout/g) , h * w
+                // gradbias : g * cout/g
+
+                // gradout : b , g , cout/g , h * w
+                // buf : b , g , h*w , cin/g * kh * kw
+                // \|/
+                // gradkernel : g , cout/g , (cin/g , kh , kw)
+
+                auto & input = input_cache;
+                const int b = input.shape()[0];
+                const int h = input.shape()[2];
+                const int w = input.shape()[3];
+                const int ckernelsize = kh * kw * groupcin;
+                const int height_col = grad_out.shape()[2];
+                const int width_col = grad_out.shape()[3];
+                
+                T alpha1 = 1.0 , beta1 = 1.0 , beta0 = 0.0;
+
+                const int col2im_n = h * w * groupcin;
+
+                Tensor<T> grad_kernel = make_view(kernel.get_grad() , kernel.shape());
+                Tensor<T> grad_bias = make_view(bias.get_grad() , bias.shape());
+                Tensor<T> grad_in(input.shape() , false , device);
+
+                const T * inputget = input.get();
+                const T * gradoutget = grad_out.get();
+                const T * kernelget = kernel.get();
+                T * gradkernelget = grad_kernel.get();
+                T * gradinget = grad_in.get();
+                T * gradbiasget = grad_bias.get();
+
+                int gradoutsize = grad_out.size();
+
+
+                if(device == Cuda){
+                    for(int i = 0;i < b;i++){
+                        CHECK_CUBLAS(
+                            cublasSgemmStridedBatched(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_N,
+                                ckernelsize,
+                                groupcout,
+                                height_col * width_col,
+                                &alpha1,
+                                buf + i * groups * height_col * width_col * ckernelsize,
+                                ckernelsize,
+                                height_col * width_col * ckernelsize,
+                                gradoutget + i * groups * groupcout * height_col * width_col,
+                                height_col * width_col,
+                                groupcout * height_col * width_col,
+                                &beta1,
+                                gradkernelget,
+                                ckernelsize,
+                                groupcout * ckernelsize,
+                                groups
+                            )
+                        );
+                    }
+                }
+                else{
+                    for(int i = 0;i < b;i++){
+                        __cpu_gemm_strided_batch<T , false , false>(
+                            groupcout,
+                            ckernelsize,
+                            height_col * width_col,
+                            gradoutget + i * groups * groupcout * height_col * width_col,
+                            groupcout * height_col * width_col,
+                            buf + i * groups * height_col * width_col * ckernelsize,
+                            height_col * width_col * ckernelsize,
+                            gradkernelget,
+                            groupcout * ckernelsize,
+                            1,
+                            1,
+                            groups
+                        );
+
+                    }
+                }
+
+                // gradout : b , (g * cout/g) , h * w
+                // gradbias : g * cout/g
+
+                if(device == Cuda){
+                    _conv_bias_backward<<< out_channels , kCudaThreadsNum , kCudaThreadsNum / 32 * sizeof(float) , stream_bias>>>(
+                        gradbiasget,
+                        gradoutget,
+                        height_col * width_col,
+                        out_channels,
+                        gradoutsize
+                    );
+                }
+                else{
+                    for(int cid = 0; cid < out_channels;cid++){
+                        T sum_grad = 0;
+                        for(int offset = cid * height_col * width_col;offset < gradoutsize; offset += height_col * width_col * out_channels){
+                            for(int i = 0;i < height_col * width_col;i++){
+                                sum_grad += grad_out[i + offset ];
+                            }
+                        }
+                        gradbiasget[cid] = sum_grad;
+
+                    }
+                }
+
+                if(device == Cuda){
+                    // gradout : b , g , cout/g , h , w
+                    // kernel : g , cout/g , (cin/g , kh , kw)
+                    // \|/
+                    // buf : b , g , h*w , cin/g * kh * kw
+                    // gradin : b , cin , ih , iw => b , g ,  cin/g , ih , iw
+                    CHECK_CUBLAS(
+                        cublasSgemmStridedBatched(
+                            handle,
+                            CUBLAS_OP_N,
+                            CUBLAS_OP_T,
+                            ckernelsize,
+                            height_col * width_col,
+                            groupcout,
+                            &alpha1,
+                            kernel_buf,
+                            ckernelsize,
+                            ckernelsize * groupcout,
+                            gradoutget,
+                            height_col * width_col,
+                            height_col * width_col * groupcout,
+                            &beta0,
+                            buf,
+                            ckernelsize,
+                            ckernelsize * height_col * width_col,
+                            groups * b
+                        )
+                    );
+
+                    col2im_2d_batch<T,false>(gradinget, buf , col2im_n,
+                        groupcin , h , w , kh , kw , 
+                        pad_h , pad_w , stride_h , stride_w , height_col , width_col ,
+                         b * groups , groupcout * h * w , ckernelsize * height_col * width_col);
+                }
+                else{
+                    // gradout : b , g , cout/g , h , w
+                    // kernel : g , cout/g , (cin/g , kh , kw)
+                    // \|/
+                    // buf : b , g , h*w , cin/g * kh * kw
+                    // gradin : b , cin , ih , iw => b , g ,  cin/g , ih , iw
+
+                    for(int i = 0 ;i < b;i++){
+                        __cpu_gemm_strided_batch<T , true , false>(
+                            height_col * width_col,
+                            ckernelsize,
+                            out_channels,
+                            gradoutget + i *  out_channels * height_col * width_col,
+                            height_col * width_col * groupcout,
+                            kernelget,
+                            ckernelsize * groupcout,
+                            buf + i * groups * height_col * width_col * ckernelsize,
+                            ckernelsize * height_col * width_col,
+                            1,
+                            0,
+                            groups
+                        );
+                    }
+
+
+                    col2im_2d_batch<T,false>(gradinget, buf , col2im_n,
+                        groupcin , h , w , kh , kw , 
+                        pad_h , pad_w , stride_h , stride_w , height_col , width_col ,
+                         b * groups , groupcout * h * w , ckernelsize * height_col * width_col , Cpu);
+
+
+                }
+
 
                 return {grad_in};
             }
@@ -2568,14 +3773,14 @@ namespace nn{
 
 
 
+
     template <typename T>
     class MaxPool2d : public Module<T>{
         private:
-            std::vector<int> kernel_shape_;
             std::shared_ptr<Functional::MaxPool2dFunc<T>> pool2d_func;
         public:
-            MaxPool2d(std::vector<int> kernel_shape , Device device = DefaultDevice) : kernel_shape_(kernel_shape){
-                pool2d_func = std::make_shared<Functional::MaxPool2dFunc<T>>(kernel_shape_ , device);
+            MaxPool2d(const int kernel_height , const int kernel_width , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 0 , const int stride_w = 0 , const Device device = DefaultDevice){
+                pool2d_func = std::make_shared<Functional::MaxPool2dFunc<T>>(kernel_height , kernel_width , pad_h , pad_w , stride_h , stride_w , device);
             }
             Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
                 Tensor<T> result = pool2d_func->forward(input);
@@ -2589,6 +3794,25 @@ namespace nn{
             }
     };
 
+    template <typename T>
+    class AvgPool2d : public Module<T>{
+        private:
+            std::shared_ptr<Functional::AvgPool2dFunc<T>> pool2d_func;
+        public:
+            AvgPool2d(const int kernel_height , const int kernel_width , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 0 , const int stride_w = 0 , const Device device = DefaultDevice){
+                pool2d_func = std::make_shared<Functional::AvgPool2dFunc<T>>(kernel_height , kernel_width , pad_h , pad_w , stride_h , stride_w , device);
+            }
+            Tensor<T> forward(const std::vector<Tensor<T>> & input) override{
+                Tensor<T> result = pool2d_func->forward(input);
+                if(input[0].requires_grad()){
+                    result.set_grad_fn(pool2d_func);
+                }
+                return result;
+            }
+            std::vector<Tensor<T>> parameters() override{
+                return {};
+            }
+    };
     
 
     __global__ void _softmax_kernel_small_512f(float * output, const float * input, const int N, const int C);
@@ -2604,7 +3828,7 @@ namespace nn{
                     throw std::runtime_error("Softmax input size must be 1");
                 }
                 auto input = inputs[0];
-                Tensor<T> output(input.shape() , input.device());
+                Tensor<T> output(input.shape() , false , input.device());
                 int stride = input.shape().back();
                 int batchsize = input.size() / stride;
                 if(output.device() == Cuda){
@@ -2777,7 +4001,7 @@ namespace nn{
             std::vector<Tensor<T>> _internal_backward(const Tensor<T> & grad_out) override{
                 int batchsize = input_cache.size() / input_cache.shape().back();
                 int step = input_cache.shape().back();
-                Tensor<T> grad_input(input_cache.shape() , input_cache.device());
+                Tensor<T> grad_input(input_cache.shape() , false , input_cache.device());
                 if(input_cache.device() == Cpu){
                     for(int i = 0;i<batchsize;i++){
                         for(int j = 0;j<step;j++){
@@ -3204,6 +4428,54 @@ namespace nn{
                 return input.reshape(newshape);
             }
     };
+    template <typename T>
+    class ResNeXtBlock : public Module<T>{
+        std::shared_ptr<Sequential<T>> left , shortcut;
+        std::vector<Tensor<T>> params;
+        public:
+            ResNeXtBlock(const int in_channels , const int out_channels , const int groups , const int bottleneck , const int stride = 1 , const Device device = DefaultDevice){
+                int middle_channels = out_channels / bottleneck;
+                left = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
+                    std::make_shared<Conv2d<T>>(in_channels , middle_channels , 1 , 1  , 0 , 0 , 1 , 1 , device),
+                    std::make_shared<BatchNorm2d<T>>(middle_channels, 0.1 , device),
+                    std::make_shared<ReLU<T>>(),
+                    std::make_shared<GroupConv2d<T>>(groups , middle_channels , middle_channels , 3 , 3  , 1 , 1 , stride , stride , device),
+                    std::make_shared<BatchNorm2d<T>>(middle_channels, 0.1 , device),
+                    std::make_shared<ReLU<T>>(),
+                    std::make_shared<Conv2d<T>>(middle_channels , out_channels , 1 , 1  , 0 , 0 , 1 , 1 , device),
+                    std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
+                }));
+
+                shortcut = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({}));
+
+                if( stride != 1 || in_channels != out_channels){
+                    shortcut = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
+                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , device),
+                        std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
+                    }));
+                }
+                params = left->parameters();
+                auto shortparams = shortcut->parameters();
+                params.insert(params.end() , shortparams.begin() , shortparams.end());
+            }
+            Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+                auto out = left->forward(inputs);
+                out = out +  shortcut->forward(inputs);
+                out = out.relu();
+                return out;
+            }
+            std::vector<Tensor<T>> parameters() override{
+                return params;
+            }
+            void train() override{
+                left->train();
+                shortcut->train();
+            }
+            void eval() override{
+                left->eval();
+                shortcut->eval();
+            }
+    };
 
     template <typename T>
     class ResBlock : public Module<T>{
@@ -3250,6 +4522,205 @@ namespace nn{
             }
     };
     template <typename T>
+    class ResNet18Cifar : public Module<T>{
+        public:
+        std::shared_ptr<Sequential<T>> conv1;
+        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
+        std::shared_ptr<Linear<T>> fc;
+        std::vector<Tensor<T>> params;
+        int in_channels , h , w;
+        cudaStream_t streams[kStreamCount];
+        ResNet18Cifar(const int num_classes , const int h = 32 , const int w = 32) : h(h) , w(w){
+            in_channels = 64;
+            conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
+                std::make_shared<Conv2d<T>>(3 , 64 , 5 , 5 , 2 , 2, 1 , 1),
+                std::make_shared<BatchNorm2d<T>>(64),
+                std::make_shared<ReLU<T>>()
+            }));
+            layer1 = make_layer(64 , 2 , 1);
+            layer2 = make_layer(128 , 2 , 2);
+            layer3 = make_layer(256 , 2 , 2);
+            layer4 = make_layer(512 , 2 , 2);
+            fc = std::make_shared<Linear<T>>(512 , num_classes);
+            params = conv1->parameters();
+            auto params1 = layer1->parameters();
+            params.insert(params.end() , params1.begin() , params1.end());
+            auto params2 = layer2->parameters();
+            params.insert(params.end() , params2.begin() , params2.end());
+            auto params3 = layer3->parameters();
+            params.insert(params.end() , params3.begin() , params3.end());
+            auto params4 = layer4->parameters();
+            params.insert(params.end() , params4.begin() , params4.end());
+            auto params5 = fc->parameters();
+            params.insert(params.end() , params5.begin() , params5.end());
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamCreate(&streams[i]));
+            }
+        }
+        ~ResNet18Cifar(){
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamDestroy(streams[i]));
+            }
+        }
+
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride){
+            std::vector<int> strides = {stride};
+            for(int i = 1;i < num_blocks;i++) strides.push_back(1);
+            std::vector<std::shared_ptr<Module<T>>> layers;
+            for(int i = 0;i < num_blocks;i++){
+                layers.push_back(std::make_shared<ResBlock<T>>(in_channels , channels , strides[i]));
+                in_channels = channels;
+            }
+            return std::make_shared<Sequential<T>>(layers);
+        }
+
+        Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+            auto out = conv1->forward(inputs);
+            out = layer1->forward({out});
+            out = layer2->forward({out});
+            out = layer3->forward({out});
+            out = layer4->forward({out});
+            out = out.avgpool2d(h / 8 , w / 8);
+            out = out.reshape({out.shape()[0] , 512});
+            out = fc->forward({out});
+            return out;
+        }
+
+        std::vector<Tensor<T>> parameters() override{
+            return params;
+        }
+
+        void zero_grad() override{
+            int i = 0;
+            for(auto & param : params){
+                param.zero_grad(streams[i % kStreamCount]);
+                i++;
+            }
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamSynchronize(streams[i]));
+            }
+        }
+        void train() override{
+            conv1->train();
+            layer1->train();
+            layer2->train();
+            layer3->train();
+            layer4->train();
+            fc->train();
+        }
+        void eval() override{
+            conv1->eval();
+            layer1->eval();
+            layer2->eval();
+            layer3->eval();
+            layer4->eval();
+            fc->eval();
+        }
+
+
+
+    };
+    template <typename T>
+    class ResNeXt18Cifar : public Module<T>{
+        public:
+        std::shared_ptr<Sequential<T>> conv1;
+        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
+        std::shared_ptr<Linear<T>> fc;
+        std::vector<Tensor<T>> params;
+        int in_channels , h , w;
+        cudaStream_t streams[kStreamCount];
+        ResNeXt18Cifar(const int num_classes , const int h = 32 , const int w = 32) : h(h) , w(w){
+            in_channels = 64;
+            conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
+                std::make_shared<BatchNorm2d<T>>(64),
+                std::make_shared<ReLU<T>>()
+            }));
+            layer1 = make_layer(64 , 2 , 1   , 32 , 1);
+            layer2 = make_layer(128 , 2 , 2 , 32 , 1);
+            layer3 = make_layer(256 , 2 , 2 , 32 , 2);
+            layer4 = make_layer(512 , 2 , 2 , 32 , 4);
+            fc = std::make_shared<Linear<T>>(512 , num_classes);
+            params = conv1->parameters();
+            auto params1 = layer1->parameters();
+            params.insert(params.end() , params1.begin() , params1.end());
+            auto params2 = layer2->parameters();
+            params.insert(params.end() , params2.begin() , params2.end());
+            auto params3 = layer3->parameters();
+            params.insert(params.end() , params3.begin() , params3.end());
+            auto params4 = layer4->parameters();
+            params.insert(params.end() , params4.begin() , params4.end());
+            auto params5 = fc->parameters();
+            params.insert(params.end() , params5.begin() , params5.end());
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamCreate(&streams[i]));
+            }
+        }
+        ~ResNeXt18Cifar(){
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamDestroy(streams[i]));
+            }
+        }
+
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const int bottleneck = 1){
+            std::vector<int> strides = {stride};
+            for(int i = 1;i < num_blocks;i++) strides.push_back(1);
+            std::vector<std::shared_ptr<Module<T>>> layers;
+            for(int i = 0;i < num_blocks;i++){
+                layers.push_back(std::make_shared<ResNeXtBlock<T>>(in_channels , channels , groups , bottleneck , strides[i]));
+                in_channels = channels;
+            }
+            return std::make_shared<Sequential<T>>(layers);
+        }
+
+        Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+            auto out = conv1->forward(inputs);
+            out = layer1->forward({out});
+            out = layer2->forward({out});
+            out = layer3->forward({out});
+            out = layer4->forward({out});
+            out = out.avgpool2d(h / 8 , w / 8);
+            out = out.reshape({out.shape()[0] , 512});
+            out = fc->forward({out});
+            return out;
+        }
+
+        std::vector<Tensor<T>> parameters() override{
+            return params;
+        }
+
+        void zero_grad() override{
+            int i = 0;
+            for(auto & param : params){
+                param.zero_grad(streams[i % kStreamCount]);
+                i++;
+            }
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamSynchronize(streams[i]));
+            }
+        }
+        void train() override{
+            conv1->train();
+            layer1->train();
+            layer2->train();
+            layer3->train();
+            layer4->train();
+            fc->train();
+        }
+        void eval() override{
+            conv1->eval();
+            layer1->eval();
+            layer2->eval();
+            layer3->eval();
+            layer4->eval();
+            fc->eval();
+        }
+
+
+
+    };
+
+    template <typename T>
     class ResNet18 : public Module<T>{
         public:
         std::shared_ptr<Sequential<T>> conv1;
@@ -3258,12 +4729,12 @@ namespace nn{
         std::vector<Tensor<T>> params;
         int in_channels , h , w;
         cudaStream_t streams[kStreamCount];
-        ResNet18(const int num_classes , const int h = 32 , const int w = 32) : h(h) , w(w){
+        ResNet18(const int num_classes , const int h , const int w ) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
                 std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
                 std::make_shared<BatchNorm2d<T>>(64),
-                std::make_shared<ReLU<T>>()
+                std::make_shared<ReLU<T>>(),
             }));
             layer1 = make_layer(64 , 2 , 1);
             layer2 = make_layer(128 , 2 , 2);
@@ -3308,7 +4779,201 @@ namespace nn{
             out = layer2->forward({out});
             out = layer3->forward({out});
             out = layer4->forward({out});
-            out = out.maxpool2d({h / 8 , w / 8});
+            out = out.avgpool2d(h / 8 , w / 8);
+            out = out.reshape({out.shape()[0] , 512});
+            out = fc->forward({out});
+            return out;
+        }
+
+        std::vector<Tensor<T>> parameters() override{
+            return params;
+        }
+
+        void zero_grad() override{
+            int i = 0;
+            for(auto & param : params){
+                param.zero_grad(streams[i % kStreamCount]);
+                i++;
+            }
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamSynchronize(streams[i]));
+            }
+        }
+        void train() override{
+            conv1->train();
+            layer1->train();
+            layer2->train();
+            layer3->train();
+            layer4->train();
+            fc->train();
+        }
+        void eval() override{
+            conv1->eval();
+            layer1->eval();
+            layer2->eval();
+            layer3->eval();
+            layer4->eval();
+            fc->eval();
+        }
+    };
+
+    template <typename T>
+    class ResNet34 : public Module<T>{
+        public:
+        std::shared_ptr<Sequential<T>> conv1;
+        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
+        std::shared_ptr<Linear<T>> fc;
+        std::vector<Tensor<T>> params;
+        int in_channels , h , w;
+        cudaStream_t streams[kStreamCount];
+        ResNet34(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
+            in_channels = 64;
+            conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1 ),
+                std::make_shared<BatchNorm2d<T>>(64),
+                std::make_shared<ReLU<T>>(),
+            }));
+            layer1 = make_layer(64 , 3 , 1);
+            layer2 = make_layer(128 , 4 , 2);
+            layer3 = make_layer(256 , 6 , 2);
+            layer4 = make_layer(512 , 3 , 2);
+            fc = std::make_shared<Linear<T>>(512 , num_classes);
+            params = conv1->parameters();
+            auto params1 = layer1->parameters();
+            params.insert(params.end() , params1.begin() , params1.end());
+            auto params2 = layer2->parameters();
+            params.insert(params.end() , params2.begin() , params2.end());
+            auto params3 = layer3->parameters();
+            params.insert(params.end() , params3.begin() , params3.end());
+            auto params4 = layer4->parameters();
+            params.insert(params.end() , params4.begin() , params4.end());
+            auto params5 = fc->parameters();
+            params.insert(params.end() , params5.begin() , params5.end());
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamCreate(&streams[i]));
+            }
+        }
+        ~ResNet34(){
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamDestroy(streams[i]));
+            }
+        }
+
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride){
+            std::vector<int> strides = {stride};
+            for(int i = 1;i < num_blocks;i++) strides.push_back(1);
+            std::vector<std::shared_ptr<Module<T>>> layers;
+            for(int i = 0;i < num_blocks;i++){
+                layers.push_back(std::make_shared<ResBlock<T>>(in_channels , channels , strides[i]));
+                in_channels = channels;
+            }
+            return std::make_shared<Sequential<T>>(layers);
+        }
+
+        Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+            auto out = conv1->forward(inputs);
+            out = layer1->forward({out});
+            out = layer2->forward({out});
+            out = layer3->forward({out});
+            out = layer4->forward({out});
+            out = out.avgpool2d(h / 8 , w / 8);
+            out = out.reshape({out.shape()[0] , 512});
+            out = fc->forward({out});
+            return out;
+        }
+
+        std::vector<Tensor<T>> parameters() override{
+            return params;
+        }
+
+        void zero_grad() override{
+            int i = 0;
+            for(auto & param : params){
+                param.zero_grad(streams[i % kStreamCount]);
+                i++;
+            }
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamSynchronize(streams[i]));
+            }
+        }
+        void train() override{
+            conv1->train();
+            layer1->train();
+            layer2->train();
+            layer3->train();
+            layer4->train();
+            fc->train();
+        }
+        void eval() override{
+            conv1->eval();
+            layer1->eval();
+            layer2->eval();
+            layer3->eval();
+            layer4->eval();
+            fc->eval();
+        }
+    };
+
+    template <typename T>
+    class ResNeXt18 : public Module<T>{
+        public:
+        std::shared_ptr<Sequential<T>> conv1;
+        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
+        std::shared_ptr<Linear<T>> fc;
+        std::vector<Tensor<T>> params;
+        int in_channels , h , w;
+        cudaStream_t streams[kStreamCount];
+        ResNeXt18(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
+            in_channels = 64;
+            conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
+                std::make_shared<BatchNorm2d<T>>(64),
+                std::make_shared<ReLU<T>>()
+            }));
+            layer1 = make_layer(64 , 2 , 1   , 32 , 1);
+            layer2 = make_layer(128 , 2 , 2 , 32 , 2);
+            layer3 = make_layer(256 , 2 , 2 , 32 , 2);
+            layer4 = make_layer(512 , 2 , 2 , 32 , 4);
+            fc = std::make_shared<Linear<T>>(512 , num_classes);
+            params = conv1->parameters();
+            auto params1 = layer1->parameters();
+            params.insert(params.end() , params1.begin() , params1.end());
+            auto params2 = layer2->parameters();
+            params.insert(params.end() , params2.begin() , params2.end());
+            auto params3 = layer3->parameters();
+            params.insert(params.end() , params3.begin() , params3.end());
+            auto params4 = layer4->parameters();
+            params.insert(params.end() , params4.begin() , params4.end());
+            auto params5 = fc->parameters();
+            params.insert(params.end() , params5.begin() , params5.end());
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamCreate(&streams[i]));
+            }
+        }
+        ~ResNeXt18(){
+            for(int i = 0;i < kStreamCount;i++){
+                CHECK(cudaStreamDestroy(streams[i]));
+            }
+        }
+
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const int bottleneck = 1){
+            std::vector<int> strides = {stride};
+            for(int i = 1;i < num_blocks;i++) strides.push_back(1);
+            std::vector<std::shared_ptr<Module<T>>> layers;
+            for(int i = 0;i < num_blocks;i++){
+                layers.push_back(std::make_shared<ResNeXtBlock<T>>(in_channels , channels , groups , bottleneck , strides[i]));
+                in_channels = channels;
+            }
+            return std::make_shared<Sequential<T>>(layers);
+        }
+
+        Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
+            auto out = conv1->forward(inputs);
+            out = layer1->forward({out});
+            out = layer2->forward({out});
+            out = layer3->forward({out});
+            out = layer4->forward({out});
+            out = out.avgpool2d(h / 8 , w / 8);
             out = out.reshape({out.shape()[0] , 512});
             out = fc->forward({out});
             return out;
@@ -3350,47 +5015,53 @@ namespace nn{
     };
 
     template <typename T>
-    class MiniResNet : public Module<T>{
+    class ResNeXt34 : public Module<T>{
         public:
         std::shared_ptr<Sequential<T>> conv1;
-        std::shared_ptr<Sequential<T>> layer1 , layer2;
+        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
         std::shared_ptr<Linear<T>> fc;
         std::vector<Tensor<T>> params;
         int in_channels , h , w;
         cudaStream_t streams[kStreamCount];
-        MiniResNet(const int num_classes , const int h = 32 , const int w = 32) : h(h) , w(w){
+        ResNeXt34(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
+                std::make_shared<Conv2d<T>>(3 , 64 , 7 , 7 , 3 , 3 , 2 , 2),
                 std::make_shared<BatchNorm2d<T>>(64),
                 std::make_shared<ReLU<T>>()
             }));
-            layer1 = make_layer(64 , 2 , 2);
-            layer2 = make_layer(256 , 2 , 2);
-            fc = std::make_shared<Linear<T>>(256 * h / 16 * w / 16 , num_classes);
+            layer1 = make_layer(64 , 3 , 1   , 32 , 1);
+            layer2 = make_layer(128 , 4 , 2 , 32 , 2);
+            layer3 = make_layer(256 , 6 , 2 , 32 , 2);
+            layer4 = make_layer(512 , 3 , 2 , 32 , 4);
+            fc = std::make_shared<Linear<T>>(512 , num_classes);
             params = conv1->parameters();
             auto params1 = layer1->parameters();
             params.insert(params.end() , params1.begin() , params1.end());
             auto params2 = layer2->parameters();
             params.insert(params.end() , params2.begin() , params2.end());
+            auto params3 = layer3->parameters();
+            params.insert(params.end() , params3.begin() , params3.end());
+            auto params4 = layer4->parameters();
+            params.insert(params.end() , params4.begin() , params4.end());
             auto params5 = fc->parameters();
             params.insert(params.end() , params5.begin() , params5.end());
             for(int i = 0;i < kStreamCount;i++){
                 CHECK(cudaStreamCreate(&streams[i]));
             }
         }
-        ~MiniResNet(){
+        ~ResNeXt34(){
             for(int i = 0;i < kStreamCount;i++){
                 CHECK(cudaStreamDestroy(streams[i]));
             }
         }
 
-        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride){
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const int bottleneck = 1){
             std::vector<int> strides = {stride};
             for(int i = 1;i < num_blocks;i++) strides.push_back(1);
             std::vector<std::shared_ptr<Module<T>>> layers;
             for(int i = 0;i < num_blocks;i++){
-                layers.push_back(std::make_shared<ResBlock<T>>(in_channels , channels , strides[i]));
+                layers.push_back(std::make_shared<ResNeXtBlock<T>>(in_channels , channels , groups , bottleneck , strides[i]));
                 in_channels = channels;
             }
             return std::make_shared<Sequential<T>>(layers);
@@ -3400,8 +5071,10 @@ namespace nn{
             auto out = conv1->forward(inputs);
             out = layer1->forward({out});
             out = layer2->forward({out});
-            out = out.maxpool2d({4 , 4});
-            out = out.reshape({out.shape()[0] , 256 * h / 16 * w / 16});
+            out = layer3->forward({out});
+            out = layer4->forward({out});
+            out = out.avgpool2d(h / 16 , w / 16);
+            out = out.reshape({out.shape()[0] , 512});
             out = fc->forward({out});
             return out;
         }
@@ -3424,18 +5097,23 @@ namespace nn{
             conv1->train();
             layer1->train();
             layer2->train();
+            layer3->train();
+            layer4->train();
             fc->train();
         }
         void eval() override{
             conv1->eval();
             layer1->eval();
             layer2->eval();
+            layer3->eval();
+            layer4->eval();
             fc->eval();
         }
-        
+
 
 
     };
+
 
 }
 }

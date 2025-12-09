@@ -39,9 +39,6 @@ namespace mytorch{
 
         template <typename T>
         void compute_gradients_of_variables(Tensor<T> & root ,const Tensor<T> & output_grad){
-            cudaEvent_t start , stop;
-            cudaEventCreate(&start);
-            cudaEventCreate(&stop);
 
             std::map<Tensor<T> , Tensor<T> , less_addr<T>> node_to_output_grads_dict;
             node_to_output_grads_dict[root] = output_grad;
@@ -67,6 +64,7 @@ namespace mytorch{
                         inputs[i].size()
                     );
                 }
+                CHECK(cudaGetLastError());
             }
 
 

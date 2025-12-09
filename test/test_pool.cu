@@ -4,13 +4,9 @@
 using namespace mytorch;
 int main(){
     DefaultDevice = Cuda;
-    auto x = randn<float>({ 2 ,4 , 4});
+    auto x = rand<float>({128 , 512 ,4 , 4});
     x.set_requires_grad(true);
-    auto pool = nn::MaxPool2d<float>({ 2 , 2});
-    auto y = pool(x);
+    auto y = x.maxpool2d(4 , 4);
     y.zero_grad();
-    y.backward(arange<float>(0 , 8 , 1).reshape({2 , 2 , 2}));
-    x.get_grad_tensor().print();
-    x.print();
-    y.print();
+    y.backward(ones<float>({128 , 512 , 1 , 1}));
 }

@@ -9,19 +9,20 @@ using namespace mytorch;
 
 int main(){
     DefaultDevice = Cuda;
-    nn::Conv2d<float> conv2d(1 , 3 , 3 , 3);
-    conv2d.kernel = ones<float>({3 , 1 , 3 , 3});
-    conv2d.bias = zeros<float>({3});
+    nn::Conv2d<float> conv2d(2 , 2 ,3 , 3);
+    conv2d.kernel = ones<float>({2 , 2 , 3 , 3});
+    conv2d.bias = zeros<float>({2});
 
-    auto x = ones<float>({1 , 1 , 4 , 4});
+    auto x = ones<float>({2 , 2 ,4 , 4});
     x.set_requires_grad(true);
-    x.print();
     auto out = conv2d(x);
-    conv2d.zero_grad();
     out.print();
+
+    conv2d.zero_grad();
     out.backward();
-    x.get_grad_tensor().print();
     conv2d.kernel.get_grad_tensor().print();
-     conv2d.bias.get_grad_tensor().print();
+    conv2d.bias.get_grad_tensor().print();
+    x.get_grad_tensor().print();
+
 
 }

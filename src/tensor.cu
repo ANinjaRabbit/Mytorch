@@ -160,18 +160,28 @@ namespace mytorch{
         return nn::Functional::MatmulFunc<T>().forward({*this , other});
     }
     template <typename T>
-    Tensor<T> Tensor<T>::maxpool2d(const std::vector<int> & kernel_shape) const {
+    Tensor<T> Tensor<T>::maxpool2d(const int kernel_height , const int kernel_width , const int pad_h, const int pad_w , const int stride_h  , const int stride_w) const {
         if(this->requires_grad()){
-            auto f =  std::make_shared<nn::Functional::MaxPool2dFunc<T>>(kernel_shape , this->device());
+            auto f =  std::make_shared<nn::Functional::MaxPool2dFunc<T>>(kernel_height , kernel_width , pad_h , pad_w , stride_h , stride_w , this->device());
             Tensor<T> result = f->forward({*this});
             result.set_grad_fn(f);
             return result;
         }
-        return nn::Functional::MaxPool2dFunc<T>(kernel_shape , this->device()).forward({*this});
+        return nn::Functional::MaxPool2dFunc<T>(kernel_height , kernel_width , pad_h , pad_w , stride_h , stride_w , this->device()).forward({*this});
+    }
+    template <typename T>
+     Tensor<T> Tensor<T>::avgpool2d(const int kernel_height , const int kernel_width , const int pad_h, const int pad_w , const int stride_h  , const int stride_w) const {
+        if(this->requires_grad()){
+            auto f =  std::make_shared<nn::Functional::AvgPool2dFunc<T>>(kernel_height , kernel_width , pad_h , pad_w , stride_h , stride_w , this->device());
+            Tensor<T> result = f->forward({*this});
+            result.set_grad_fn(f);
+            return result;
+        }
+        return nn::Functional::AvgPool2dFunc<T>(kernel_height , kernel_width , pad_h , pad_w , stride_h , stride_w , this->device()).forward({*this});
     }
     template <typename T>
     void Tensor<T>::backward(const Tensor<T> & grad_out) {
-        auto grad = grad_out.deepcopy();
+        auto grad = grad_out;
         if(grad_out.is_null()){
             grad = ones<T>(this->shape() , this->device());
         }
