@@ -9,11 +9,11 @@ using namespace mytorch;
 
 int main(){
     DefaultDevice = Cuda;
-    nn::Conv2d<float> conv2d(2 , 2 ,3 , 3);
-    conv2d.kernel = ones<float>({2 , 2 , 3 , 3});
+    nn::GroupConv2d<float> conv2d(1 , 2 , 2 ,3 , 3);
+    conv2d.kernel = ones<float>({1 , 2 , 2 , 3 , 3});
     conv2d.bias = zeros<float>({2});
 
-    auto x = ones<float>({2 , 2 ,4 , 4});
+    auto x = ones<float>({4 , 2 ,4 , 4});
     x.set_requires_grad(true);
     auto out = conv2d(x);
     out.print();

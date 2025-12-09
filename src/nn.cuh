@@ -3332,8 +3332,13 @@ namespace nn{
     }
 
 
+    __global__ void implSgemmgradinputgroup( float * gradinput , const float * gradout ,const float * weight_ ,
+        const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
     template <typename T>
-    void implGemmgradinput( T * gradinput , const T * gradout ,const T * weight ,
+    void implGemmgradinputgroup( T * gradinput , const T * gradout ,const T * weight ,
         const int n , const int c , const int h , const int w, const int g , const int k , const int kh , const int kw , 
         const int pad_h , const int pad_w , const int stride_h , const int stride_w,
         const int oh , const int ow
@@ -3392,12 +3397,13 @@ namespace nn{
             int kernel_buf_size;
             cublasHandle_t handle;
             cudaStream_t stream_bias;
+            bool use_impl;
         public:
             Tensor<T> kernel;
             Tensor<T> bias;
             GroupConv2d(const int groups , const int in_channels , const int out_channels ,
-                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice) : 
-                 groups(groups) , device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels){
+                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice , const bool use_impl = true) : 
+                 groups(groups) , device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl){
                 if(kh % 2 == 0 || kw % 2 == 0){
                     std::cerr << "GroupConv2d: kernel size must be odd" << std::endl;
                     throw std::runtime_error("GroupConv2d: kernel size must be odd");
@@ -3476,55 +3482,64 @@ namespace nn{
                 const int resultsize = result.size();
 
                 if(device == Cuda){
-
-                    if(buf_size < b * groups * height_col * width_col * ckernelsize ){
-                        if(buf){
-                            CHECK(cudaFree(buf));
-                        }
-                        buf_size = b * groups * height_col * width_col * ckernelsize;
-                        CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
+                    if(use_impl){
+                        groupconv2d_forward_gpu<T>(
+                            resultget , inputget , kernelget , bias.get()
+                            , b * groups , groupcin , h , w , groups , groupcout,
+                            kh , kw , pad_h , pad_w , stride_h , stride_w , height_col , width_col
+                        );
                     }
-                    if(kernel_buf_size < b * kernel.size()){
-                        if(kernel_buf){
-                            CHECK(cudaFree(kernel_buf));
+                    else{
+                        if(buf_size < b * groups * height_col * width_col * ckernelsize ){
+                            if(buf){
+                                CHECK(cudaFree(buf));
+                            }
+                            buf_size = b * groups * height_col * width_col * ckernelsize;
+                            CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
                         }
-                        kernel_buf_size = b * kernel.size();
-                        CHECK(cudaMalloc(&kernel_buf , kernel_buf_size * sizeof(T) ));
-                    }
-                    _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
-                        resultget , bias.get() , resultsize , height_col * width_col , out_channels
-                    );
-                    im2col_2d_batch<T , false>(buf, inputget,
-                        n, groupcin, h , w,
-                        kh , kw , pad_h , pad_w , stride_h , stride_w,
-                        height_col , width_col , b * groups , groupcin * h * w , height_col * width_col * ckernelsize
-                    );
+                        if(kernel_buf_size < b * kernel.size()){
+                            if(kernel_buf){
+                                CHECK(cudaFree(kernel_buf));
+                            }
+                            kernel_buf_size = b * kernel.size();
+                            CHECK(cudaMalloc(&kernel_buf , kernel_buf_size * sizeof(T) ));
+                        }
+                        _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
+                            resultget , bias.get() , resultsize , height_col * width_col , out_channels
+                        );
+                        im2col_2d_batch<T , false>(buf, inputget,
+                            n, groupcin, h , w,
+                            kh , kw , pad_h , pad_w , stride_h , stride_w,
+                            height_col , width_col , b * groups , groupcin * h * w , height_col * width_col * ckernelsize
+                        );
 
-                    __make_kernel_buf<T><<<CudaGetBlocks(kernel_buf_size) , kCudaThreadsNum >>>(
-                        kernel_buf , kernelget , kernel_buf_size , kernel.size()
-                    );
-                    CHECK_CUBLAS(
-                        cublasGemmStridedBatched<T>(
-                            handle,
-                            CUBLAS_OP_T,
-                            CUBLAS_OP_N,
-                            height_col * width_col,
-                            groupcout,
-                            ckernelsize,
-                            &alpha1,
-                            buf,
-                            ckernelsize,
-                            ckernelsize * height_col * width_col,
-                            kernel_buf, // g , cout/g , ckernelsize
-                            ckernelsize,
-                            groupcout * ckernelsize,
-                            &beta1,
-                            resultget,
-                            height_col * width_col,
-                            height_col * width_col * groupcout,
-                            groups * b
-                        )
-                    );
+                        __make_kernel_buf<T><<<CudaGetBlocks(kernel_buf_size) , kCudaThreadsNum >>>(
+                            kernel_buf , kernelget , kernel_buf_size , kernel.size()
+                        );
+                        CHECK_CUBLAS(
+                            cublasGemmStridedBatched<T>(
+                                handle,
+                                CUBLAS_OP_T,
+                                CUBLAS_OP_N,
+                                height_col * width_col,
+                                groupcout,
+                                ckernelsize,
+                                &alpha1,
+                                buf,
+                                ckernelsize,
+                                ckernelsize * height_col * width_col,
+                                kernel_buf, // g , cout/g , ckernelsize
+                                ckernelsize,
+                                groupcout * ckernelsize,
+                                &beta1,
+                                resultget,
+                                height_col * width_col,
+                                height_col * width_col * groupcout,
+                                groups * b
+                            )
+                        );
+
+                    }
 
                 }
                 else{
@@ -3608,6 +3623,7 @@ namespace nn{
                 T alpha1 = 1.0 , beta1 = 1.0 , beta0 = 0.0;
 
                 const int col2im_n = h * w * groupcin;
+                int im2col_n = groupcin * height_col * width_col;
 
                 Tensor<T> grad_kernel = make_view(kernel.get_grad() , kernel.shape());
                 Tensor<T> grad_bias = make_view(bias.get_grad() , bias.shape());
@@ -3624,29 +3640,72 @@ namespace nn{
 
 
                 if(device == Cuda){
-                    for(int i = 0;i < b;i++){
-                        CHECK_CUBLAS(
-                            cublasSgemmStridedBatched(
-                                handle,
-                                CUBLAS_OP_N,
-                                CUBLAS_OP_N,
-                                ckernelsize,
-                                groupcout,
-                                height_col * width_col,
-                                &alpha1,
-                                buf + i * groups * height_col * width_col * ckernelsize,
-                                ckernelsize,
-                                height_col * width_col * ckernelsize,
-                                gradoutget + i * groups * groupcout * height_col * width_col,
-                                height_col * width_col,
-                                groupcout * height_col * width_col,
-                                &beta1,
-                                gradkernelget,
-                                ckernelsize,
-                                groupcout * ckernelsize,
-                                groups
-                            )
-                        );
+                    if(use_impl){
+                        if(buf_size < groups * height_col * width_col * ckernelsize){
+                            if(buf){
+                                CHECK(cudaFree(buf));
+                            }
+                            buf_size = groups * height_col * width_col * ckernelsize;
+                            CHECK(cudaMalloc(&buf , buf_size * sizeof(T)));
+                        }
+                        for(int i = 0;i < b;i++){
+                            im2col_2d_batch<T , false>(buf, inputget + i * groups * groupcin * h * w,
+                                im2col_n, groupcin, h , w,
+                                kh , kw , pad_h , pad_w , stride_h , stride_w,
+                                height_col , width_col ,  groups , groupcin * h * w , height_col * width_col * ckernelsize , device
+                            );
+                            CHECK_CUBLAS(
+                                cublasSgemmStridedBatched(
+                                    handle,
+                                    CUBLAS_OP_N,
+                                    CUBLAS_OP_N,
+                                    ckernelsize,
+                                    groupcout,
+                                    height_col * width_col,
+                                    &alpha1,
+                                    buf,
+                                    ckernelsize,
+                                    height_col * width_col * ckernelsize,
+                                    gradoutget + i * groups * groupcout * height_col * width_col,
+                                    height_col * width_col,
+                                    groupcout * height_col * width_col,
+                                    &beta1,
+                                    gradkernelget,
+                                    ckernelsize,
+                                    groupcout * ckernelsize,
+                                    groups
+                                )
+                            );
+
+
+                        }
+                    }
+                    else{
+                        for(int i = 0;i < b;i++){
+                            CHECK_CUBLAS(
+                                cublasSgemmStridedBatched(
+                                    handle,
+                                    CUBLAS_OP_N,
+                                    CUBLAS_OP_N,
+                                    ckernelsize,
+                                    groupcout,
+                                    height_col * width_col,
+                                    &alpha1,
+                                    buf + i * groups * height_col * width_col * ckernelsize,
+                                    ckernelsize,
+                                    height_col * width_col * ckernelsize,
+                                    gradoutget + i * groups * groupcout * height_col * width_col,
+                                    height_col * width_col,
+                                    groupcout * height_col * width_col,
+                                    &beta1,
+                                    gradkernelget,
+                                    ckernelsize,
+                                    groupcout * ckernelsize,
+                                    groups
+                                )
+                            );
+                        }
+
                     }
                 }
                 else{
@@ -3700,33 +3759,40 @@ namespace nn{
                     // \|/
                     // buf : b , g , h*w , cin/g * kh * kw
                     // gradin : b , cin , ih , iw => b , g ,  cin/g , ih , iw
-                    CHECK_CUBLAS(
-                        cublasSgemmStridedBatched(
-                            handle,
-                            CUBLAS_OP_N,
-                            CUBLAS_OP_T,
-                            ckernelsize,
-                            height_col * width_col,
-                            groupcout,
-                            &alpha1,
-                            kernel_buf,
-                            ckernelsize,
-                            ckernelsize * groupcout,
-                            gradoutget,
-                            height_col * width_col,
-                            height_col * width_col * groupcout,
-                            &beta0,
-                            buf,
-                            ckernelsize,
-                            ckernelsize * height_col * width_col,
-                            groups * b
-                        )
-                    );
+                    if(use_impl){
+                        implGemmgradinputgroup<T>(gradinget , gradoutget  , kernelget , b * groups , groupcin , 
+                        h , w ,groups ,  groupcout , kh , kw , pad_h , pad_w , stride_h , stride_w , height_col , width_col);
+                    }
+                    else{
+                        CHECK_CUBLAS(
+                            cublasSgemmStridedBatched(
+                                handle,
+                                CUBLAS_OP_N,
+                                CUBLAS_OP_T,
+                                ckernelsize,
+                                height_col * width_col,
+                                groupcout,
+                                &alpha1,
+                                kernel_buf,
+                                ckernelsize,
+                                ckernelsize * groupcout,
+                                gradoutget,
+                                height_col * width_col,
+                                height_col * width_col * groupcout,
+                                &beta0,
+                                buf,
+                                ckernelsize,
+                                ckernelsize * height_col * width_col,
+                                groups * b
+                            )
+                        );
 
-                    col2im_2d_batch<T,false>(gradinget, buf , col2im_n,
-                        groupcin , h , w , kh , kw , 
-                        pad_h , pad_w , stride_h , stride_w , height_col , width_col ,
-                         b * groups , groupcout * h * w , ckernelsize * height_col * width_col);
+                        col2im_2d_batch<T,false>(gradinget, buf , col2im_n,
+                            groupcin , h , w , kh , kw , 
+                            pad_h , pad_w , stride_h , stride_w , height_col , width_col ,
+                            b * groups , groupcout * h * w , ckernelsize * height_col * width_col);
+
+                    }
                 }
                 else{
                     // gradout : b , g , cout/g , h , w
@@ -5026,7 +5092,7 @@ namespace nn{
         ResNeXt34(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 7 , 7 , 3 , 3 , 2 , 2),
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1 , 1 , 1),
                 std::make_shared<BatchNorm2d<T>>(64),
                 std::make_shared<ReLU<T>>()
             }));
@@ -5073,7 +5139,7 @@ namespace nn{
             out = layer2->forward({out});
             out = layer3->forward({out});
             out = layer4->forward({out});
-            out = out.avgpool2d(h / 16 , w / 16);
+            out = out.avgpool2d(h / 8 , w / 8);
             out = out.reshape({out.shape()[0] , 512});
             out = fc->forward({out});
             return out;

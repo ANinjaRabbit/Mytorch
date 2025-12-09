@@ -8,9 +8,9 @@ using namespace mytorch;
 
 int main(){
     DefaultDevice = Cuda;
-    auto X = rand<float>({64 , 3 , 64 , 64});
+    auto X = rand<float>({32 , 3 , 64 , 64});
     X.set_requires_grad(true);
-    auto y  = rand<float>({64}) * 200;
+    auto y  = rand<float>({32}) * 200;
     auto model = nn::ResNet18<float>(200 , 64 , 64);
     auto params = model.parameters();
 
