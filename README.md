@@ -105,5 +105,3 @@ cmake --build . --config Release
 ## 🧪 Pre-implemented Modelss
 - ResNet18/34
 - ResNeXt18/34
-s
-This framework, while simplified, contains the core components of modern deep learning frameworks and is suitable for learning and research purposes. 🎓🔬
