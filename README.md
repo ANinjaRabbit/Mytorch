@@ -1,5 +1,9 @@
 # 🧠 MyTorch - A Minimal Deep Learning Framework
 
+## ⚠️ Warning
+- This repository is only for my programming in ai course(PKU). It is not intended for production use.
+- The framework is still under development, and some features may be incomplete or subject to change.
+
 ## 📖 Introduction
 MyTorch is a lightweight deep learning framework written in C++/CUDA with automatic differentiation, neural network modules, optimizers, and Python bindings.
 
