@@ -39,50 +39,6 @@ MyTorch is a lightweight deep learning framework written in C++/CUDA with automa
 - AdamW
 - Learning rate schedulers: StepLR, CosineAnnealingLR
 
-## 💻 Usage Examples
-
-### 🐍 Python Interface Example
-```python
-import mytorch
-
-# Set default device to CUDA
-mytorch.set_default_device(mytorch.Cuda)
-
-# Create LeNet model
-lenet = mytorch.nn.Sequential([
-    mytorch.nn.Conv([6, 1, 5, 5], mytorch.nn.NoPadding),
-    mytorch.nn.ReLU(),
-    mytorch.nn.Pool2d((2, 2)),
-    mytorch.nn.Conv([16, 6, 5, 5], mytorch.nn.NoPadding),
-    mytorch.nn.ReLU(),
-    mytorch.nn.Pool2d((2, 2)),
-    mytorch.nn.Flatten(start_dim=1),
-    mytorch.nn.Linear(16 * 4 * 4, 120),
-    mytorch.nn.ReLU(),
-    mytorch.nn.Linear(120, 84),
-    mytorch.nn.ReLU(),
-    mytorch.nn.Linear(84, 10)
-])
-
-# Create random input and labels
-x = mytorch.randn((10, 1, 28, 28))
-x.set_requires_grad(True)
-label = mytorch.randn((10, 10))
-
-# Define optimizer
-optim = mytorch.optim.Adam(lenet.parameters(), 0.001)
-
-# Training loop
-for i in range(100):
-    y = lenet(x)
-    loss = (y - label) ** 2
-    loss = loss.sum()
-    print(loss.item())
-    loss.zero_grad()
-    loss.backward()
-    optim.step()
-```
-
 ## 🛠️ Build Instructions
 ```bash
 mkdir build
@@ -105,3 +61,5 @@ cmake --build . --config Release
 ## 🧪 Pre-implemented Modelss
 - ResNet18/34
 - ResNeXt18/34
+
+🔬
