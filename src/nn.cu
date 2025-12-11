@@ -551,6 +551,328 @@ namespace nn{
 
     }
 
+    __global__ void implDgemmgroup( double * output , const double * input ,const double * weight_ ,const double * bias,
+        const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        // for alignment
+        __shared__ __align__(16 * 1024) char smem[32 * 1024];
+        double *smemweight = reinterpret_cast<double *>(smem);
+        double * smeminput = reinterpret_cast<double *>(smem + 16 * 1024);
+
+        int tid = threadIdx.x;
+        int bx = blockIdx.x;
+        int by = blockIdx.y;
+
+        // Warp tile
+        // arrange like this: (to avoid bank conflict)
+        /*
+        in a warp tile
+        0   2   4   6   8   10  12  14
+        1   3   5   7   9   11  13  15
+        16  18  20  22  24  26  28  30
+        17  19  21  23  25  27  29  31
+        map to the output: (each number correspond to 4x4 tile)
+        (so each laneid correspond to 8x8)
+        0   2   4   6   8   10  12  14 0   2   4   6   8   10  12  14
+        1   3   5   7   9   11  13  15 1   3   5   7   9   11  13  15
+        16  18  20  22  24  26  28  30 16  18  20  22  24  26  28  30
+        17  19  21  23  25  27  29  31 17  19  21  23  25  27  29  31
+        0   2   4   6   8   10  12  14 0   2   4   6   8   10  12  14
+        1   3   5   7   9   11  13  15 1   3   5   7   9   11  13  15
+        16  18  20  22  24  26  28  30 16  18  20  22  24  26  28  30
+        17  19  21  23  25  27  29  31 17  19  21  23  25  27  29  31
+        */
+        const int lane_id = threadIdx.x % 32;
+        const int warp_id = threadIdx.x / 32;
+        const int warp_tile_x = (lane_id / 2) % 8;
+        const int warp_tile_y = (lane_id / 16) * 2 + (lane_id % 2);
+
+        //lds address :in the output tile
+        // correspond to the pos of the first laneid show in preceding tile
+        int weight_lds_addr = (warp_id / 2) * 32 + warp_tile_y * 4;
+        int input_lds_addr = (warp_id % 2) * 64 + warp_tile_x * 4;
+
+        //address in the whole output
+
+        int z = blockIdx.z; // batchsize
+        int gid = blockIdx.z % g; // groupid
+
+        // register for load from global memory
+        // for pipeline
+        double weight_ldg_reg[4];
+        double input_ldg_reg[4];
+
+        // original position in the image for the points to load 
+        // in the input (individual with output)
+        /*
+        [0~32] , [0~32] , [0~32] , [0~32]
+        [32~64] , [32~64] , [32~64] , [32~64]
+        ...
+        */
+        int posh_ori[4];
+        int posw_ori[4];
+
+    #pragma unroll
+        for(int i = 0; i < 4;i++){ // intialize ori
+            posh_ori[i] = ((bx * 128 + tid % 32 + i * 32) / ow) * stride_h - pad_h;
+            posw_ori[i] = ((bx * 128 + tid % 32 + i * 32) % ow) * stride_w - pad_w;
+        }
+
+        // for load!
+        // kernel load like this:(transpose to store)
+        /*
+        0 0 0 0 8 8 8 8 ...
+        1 1 1 1 9 9 9 9
+        2 2 2 2 10 10 10 10
+        3 3 3 3 11 11 11 11
+        ....
+        */
+        int inputbatchoffset = z * c * h * w;
+        int weightoffset = (by * 128 + tid / 8 * 4) * c * kh * kw;
+        int inputchannelstep = h * w;
+        int weightkstep = c * kh * kw;
+        const double * weight = weight_ + gid * weightkstep * k;
+
+        // sts addr : where to store in smem (the first position)
+        int weight_sts_addr = (tid % 8) * 132 + (tid / 8) * 4;
+        int input_sts_addr = (tid / 32) * 128 + (tid % 32);
+
+        // pipeline!
+        int write_flag = 1;
+        // frag for matmul
+        double weight_frag[2][8]; 
+        double input_frag[2][8];
+        double output_frag[8][8];
+
+    #pragma unroll
+        for(int i = 0;i < 8;i++){ // initialize output frag
+            for(int j = 0;j < 8;j++){
+                output_frag[i][j] = 0;
+            }
+        }
+
+        // perform the first load from global(ldg) for pipeline
+
+        // first kernel
+        /*
+        0 0 0 0 8 8 8 8 ...
+        1 1 1 1 9 9 9 9
+        2 2 2 2 10 10 10 10
+        3 3 3 3 11 11 11 11
+        ....
+        */
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            if(tid % 8 < weightkstep && (by * 128 + tid / 8 * 4 + i) < k){
+                weight_ldg_reg[i] = weight[weightoffset + tid % 8 + i * weightkstep];
+            }
+            else{
+                weight_ldg_reg[i] = 0;
+            }
+        }
+
+        // next input
+        /*
+        [0~32] , [0~32] , [0~32] , [0~32]
+        [32~64] , [32~64] , [32~64] , [32~64]
+        ...
+        */
+        int curC = (tid / 32) / (kh * kw);
+        int curkH = ((tid / 32) % (kh * kw)) / kw;
+        int curkW = ((tid / 32) % (kh * kw)) % kw;
+
+
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            int curH = posh_ori[i] + curkH;
+            int curW = posw_ori[i] + curkW;
+            int inoffsettmp = curC * inputchannelstep + curH * w + curW;
+            if(curH >= 0 && curH < h && curW >= 0 && curW < w && curC < c){
+                input_ldg_reg[i] = input[inputbatchoffset + inoffsettmp];
+            }
+            else{
+                input_ldg_reg[i] = 0;
+            }
+        }
+
+        // stores to shared (sts)
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            smemweight[weight_sts_addr + i] = weight_ldg_reg[i];
+        }
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            smeminput[input_sts_addr + i * 32] = input_ldg_reg[i];
+        }
+        __syncthreads();
+        // load from shared(lds)
+        // load the number we need in matmul
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            weight_frag[0][i] = smemweight[weight_lds_addr + i];
+            weight_frag[0][i+4] = smemweight[weight_lds_addr + i + 16];
+        }
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            input_frag[0][i] = smeminput[input_lds_addr + i];
+            input_frag[0][i+4] = smeminput[input_lds_addr + i + 32];
+        }
+        for(int crs = 0; crs < c * kh * kw;crs+= 8){
+            // prefetch for pipeline
+            // first kernel
+            /*
+            0 0 0 0 8 8 8 8 ...
+            1 1 1 1 9 9 9 9
+            2 2 2 2 10 10 10 10
+            3 3 3 3 11 11 11 11
+            ....
+            */
+           int weightoffsettmp = crs + 8 + tid % 8;// +8 for prefetch
+        #pragma unroll
+            for(int i = 0;i < 4;i++){
+                if(weightoffsettmp < weightkstep && (by * 128 + tid / 8 * 4 + i) < k){
+                    weight_ldg_reg[i] = weight[weightoffset + weightoffsettmp + i * weightkstep];
+                }
+                else{
+                    weight_ldg_reg[i] = 0;
+                }
+            }
+
+            // next input
+            /*
+            [0~32] , [0~32] , [0~32] , [0~32]
+            [32~64] , [32~64] , [32~64] , [32~64]
+            ...
+            */
+            int curC = (crs + 8 + tid / 32) / (kh * kw);
+            int curkH = ((crs + 8 + tid / 32) % (kh * kw)) / kw;
+            int curkW = ((crs + 8 + tid / 32) % (kh * kw)) % kw;
+
+        #pragma unroll
+            for(int i = 0;i < 4;i++){
+                int curH = posh_ori[i] + curkH;
+                int curW = posw_ori[i] + curkW;
+                int inoffsettmp = curC * inputchannelstep + curH * w + curW;
+                if(curH >= 0 && curH < h && curW >= 0 && curW < w && curC < c){
+                    input_ldg_reg[i] = input[inputbatchoffset + inoffsettmp];
+                }
+                else{
+                    input_ldg_reg[i] = 0;
+                }
+            }
+
+            int load_flag = write_flag ^ 1;
+    #pragma unroll
+            for (int subcrs = 0; subcrs < 8 - 1; ++subcrs)
+            {
+    #pragma unroll
+                for (int i = 0; i < 4; ++i)
+                {
+                    weight_frag[(subcrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i];
+                    weight_frag[(subcrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i + 16];
+                }
+    #pragma unroll
+                for (int i = 0; i < 4; ++i)
+                {
+                    input_frag[(subcrs + 1) % 2][i] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i];
+                    input_frag[(subcrs + 1) % 2][i + 4] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i + 32];
+                }
+
+    #pragma unroll
+                for (int i = 0; i < 8; ++i)
+                {
+    #pragma unroll
+                    for (int j = 0; j < 8; ++j)
+                    {
+                        output_frag[i][j] += weight_frag[subcrs % 2][i] * input_frag[subcrs % 2][j];
+                    }
+                }
+            }
+
+            // store to shared mem
+            for (int i = 0; i < 4; ++i)
+            {
+                smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
+            }
+            for (int i = 0; i < 4; ++i)
+            {
+                smeminput[write_flag * 128 * 8 + input_sts_addr + i * 32] = input_ldg_reg[i];
+            }
+            __syncthreads();
+
+            write_flag ^= 1;
+    #pragma unroll
+            for (int i = 0; i < 4; ++i)
+            {
+                weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
+                weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
+            }
+    #pragma unroll
+            for (int i = 0; i < 4; ++i)
+            {
+                input_frag[0][i] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i];
+                input_frag[0][i + 4] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i + 32];
+            }
+    #pragma unroll
+            for (int i = 0; i < 8; ++i)
+            {
+    #pragma unroll
+                for (int j = 0; j < 8; ++j)
+                {
+                    output_frag[i][j] += weight_frag[1][i] * input_frag[1][j];
+                }
+            }
+        }
+
+        double * smemoutput = reinterpret_cast<double *>(smem);
+        double * smembias = reinterpret_cast<double *>(smem + 16 * 1024);
+
+        if(tid < 128){
+            smembias[tid] = bias[by * 128 + tid];
+        }
+
+        // only store a quater of the output!
+
+        int output_sts_addr = warp_id * 512 +  warp_tile_y * 4 * 8 * 4 + warp_tile_x * 4;
+        // load:
+        /*
+        (0 ~ 32) * 16
+        */
+        int output_lds_addr = warp_id * 512 + lane_id;
+        int bias_lds_addr = warp_id / 2 * 32;
+
+        int m_idx = by * 128 + warp_id / 2 * 32;
+        int n_idx = bx * 128 + warp_id % 2 * 64 + lane_id;
+
+    #pragma unroll
+        for(int i = 0;i < 2;i++){
+    #pragma unroll
+            for(int j = 0;j <2 ;j++){
+                __syncthreads();
+#pragma unroll
+                for(int subi = 0; subi < 4;subi++){ 
+#pragma unroll
+                    for(int subj = 0;subj < 4;subj++){
+                        smemoutput[output_sts_addr + subi * 32 + subj] = output_frag[i * 4 + subi][j * 4 + subj];
+                    }
+                }
+                __syncthreads();
+#pragma unroll
+
+                for(int subk = 0;subk < 16;subk++){
+                    int outOffset = z * k * oh * ow + (m_idx + i * 16 + subk) * oh * ow + n_idx + j * 32;
+                    if((m_idx + i * 16 + subk) < k && (n_idx + j * 32) < oh * ow){
+                        output[outOffset] = smemoutput[output_lds_addr + subk * 32] + smembias[bias_lds_addr + i * 16 + subk];
+                    }
+                }
+
+            }
+        }
+
+    }
+
 
     __global__ void implSgemm( float * output , const float * input ,const float * weight ,const float * bias,
         const int n , const int c , const int h , const int w, const int k , const int kh , const int kw , 
@@ -1292,6 +1614,342 @@ namespace nn{
         float weight_frag[2][8]; 
         float gradout_frag[2][8];
         float gradinput_frag[8][8];
+
+    #pragma unroll
+        for(int i = 0;i < 8;i++){ // initialize gradinput frag
+            for(int j = 0;j < 8;j++){
+                gradinput_frag[i][j] = 0;
+            }
+        }
+
+        // perform the first load from global(ldg) for pipeline
+
+        // first kernel
+        /*
+        0 0 0 0 8 8 8 8 ...
+        1 1 1 1 9 9 9 9
+        2 2 2 2 10 10 10 10
+        3 3 3 3 11 11 11 11
+        ....
+        */
+       int curKRS = tid % 8;
+       int rs = kh  * kw -  1 - curKRS % ( kh * kw); // transpose
+       int curK = curKRS / (kh * kw);
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            if( (curK * kh * kw + rs) < kh * kw * k && weightC + i < c){
+                weight_ldg_reg[i] = weight[curK * weikstep + (weightC + i) * weicstep + rs];
+            }
+            else{
+                weight_ldg_reg[i] = 0;
+            }
+        }
+
+
+        // next input
+        /*
+        [0~32] , [0~32] , [0~32] , [0~32]
+        [32~64] , [32~64] , [32~64] , [32~64]
+        ...
+        */
+        int curK2 = (tid / 32) / (kh * kw);
+        int curkH = (tid / 32) % (kh * kw) / kw;
+        int curkW = (tid / 32) % (kh * kw) % kw;
+
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            int cursOh = possoh_ori[i] + curkH;
+            int cursOw = possow_ori[i] + curkW;
+            int curOh = cursOh  / stride_h;
+            int curOw = cursOw  / stride_w;
+            if(curOh * stride_h!= cursOh || curOw * stride_w!= cursOw){
+                gradout_ldg_reg[i] = 0;
+            }
+            else{
+                int outoffsettmp = curK2 * outkstep + curOh * ow + curOw;
+                if(curOh >= 0 && curOh < oh && curOw >= 0 && curOw < ow && curK2 < k){
+                    gradout_ldg_reg[i] = gradout[gradoutbatchoffset + outoffsettmp];
+                }
+                else{
+                    gradout_ldg_reg[i] = 0;
+                }
+            }
+        }
+
+        // stores to shared (sts)
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            smemweight[weight_sts_addr + i] = weight_ldg_reg[i];
+        }
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            smemgradout[gradout_sts_addr + i * 32] = gradout_ldg_reg[i];
+        }
+        __syncthreads();
+        // load from shared(lds)
+        // load the number we need in matmul
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            weight_frag[0][i] = smemweight[weight_lds_addr + i];
+            weight_frag[0][i+4] = smemweight[weight_lds_addr + i + 16];
+        }
+    #pragma unroll
+        for(int i = 0;i < 4;i++){
+            gradout_frag[0][i] = smemgradout[gradout_lds_addr + i];
+            gradout_frag[0][i+4] = smemgradout[gradout_lds_addr + i + 32];
+        }
+        for(int krs = 0; krs < k * kh * kw ; krs += 8){
+            // prefetch for pipeline
+            // first kernel
+            /*
+            0 0 0 0 8 8 8 8 ...
+            1 1 1 1 9 9 9 9
+            2 2 2 2 10 10 10 10
+            3 3 3 3 11 11 11 11
+            ....
+            */
+            int curKRS = krs + tid % 8 + 8;
+            int rs = kh  * kw -  1 - curKRS % ( kh * kw); // transpose
+            int curK = curKRS / (kh * kw);
+        #pragma unroll
+            for(int i = 0;i < 4;i++){
+                if( (curK * kh * kw + rs) < kh * kw * k){
+                    weight_ldg_reg[i] = weight[curK * weikstep + (weightC + i) * weicstep + rs];
+                }
+                else{
+                    weight_ldg_reg[i] = 0;
+                }
+            }
+
+
+
+            // next input
+            /*
+            [0~32] , [0~32] , [0~32] , [0~32]
+            [32~64] , [32~64] , [32~64] , [32~64]
+            ...
+            */
+
+            int curK2 = ( krs + tid/ 32 + 8) / (kh * kw);
+            int curkH = (( krs + tid / 32 + 8) % (kh * kw)) / kw;
+            int curkW = (( krs + tid / 32 + 8) % (kh * kw)) % kw;
+
+        #pragma unroll
+            for(int i = 0;i < 4;i++){
+                int cursOh = possoh_ori[i] + curkH;
+                int cursOw = possow_ori[i] + curkW;
+                int curOh = cursOh  / stride_h;
+                int curOw = cursOw  / stride_w;
+                if(curOh * stride_h!= cursOh || curOw * stride_w!= cursOw){
+                    gradout_ldg_reg[i] = 0;
+                }
+                else{
+                    int outoffsettmp = curK2 * outkstep + curOh * ow + curOw;
+                    if(curOh >= 0 && curOh < oh && curOw >= 0 && curOw < ow && curK2 < k){
+                        gradout_ldg_reg[i] = gradout[gradoutbatchoffset + outoffsettmp];
+                    }
+                    else{
+                        gradout_ldg_reg[i] = 0;
+                    }
+                }
+            }
+
+            int load_flag = write_flag ^ 1;
+    #pragma unroll
+            for (int subkrs = 0; subkrs < 8 - 1; ++subkrs)
+            {
+    #pragma unroll
+                for (int i = 0; i < 4; ++i)
+                {
+                    weight_frag[(subkrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + i];
+                    weight_frag[(subkrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + i + 16];
+                }
+    #pragma unroll
+                for (int i = 0; i < 4; ++i)
+                {
+                    gradout_frag[(subkrs + 1) % 2][i] = smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + i];
+                    gradout_frag[(subkrs + 1) % 2][i + 4] = smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + i + 32];
+                }
+
+    #pragma unroll
+                for (int i = 0; i < 8; ++i)
+                {
+    #pragma unroll
+                    for (int j = 0; j < 8; ++j)
+                    {
+                        gradinput_frag[i][j] += weight_frag[subkrs % 2][i] * gradout_frag[subkrs % 2][j];
+                    }
+                }
+            }
+
+            // store to shared mem
+            for (int i = 0; i < 4; ++i)
+            {
+                smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
+            }
+            for (int i = 0; i < 4; ++i)
+            {
+                smemgradout[write_flag * 128 * 8 + gradout_sts_addr + i * 32] = gradout_ldg_reg[i];
+            }
+            __syncthreads();
+
+            write_flag ^= 1;
+    #pragma unroll
+            for (int i = 0; i < 4; ++i)
+            {
+                weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
+                weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
+            }
+    #pragma unroll
+            for (int i = 0; i < 4; ++i)
+            {
+                gradout_frag[0][i] = smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + i];
+                gradout_frag[0][i + 4] = smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + i + 32];
+            }
+    #pragma unroll
+            for (int i = 0; i < 8; ++i)
+            {
+    #pragma unroll
+                for (int j = 0; j < 8; ++j)
+                {
+                    gradinput_frag[i][j] += weight_frag[1][i] * gradout_frag[1][j];
+                }
+            }
+        }
+
+        int gradinputOffset;
+    #pragma unroll
+        for (int i = 0; i < 4; ++i)
+        {
+    #pragma unroll
+            for (int j = 0; j < 4; ++j)
+            {
+                gradinputOffset = z * c * h * w + (y + i) * h * w + x + j;
+                if (x + j < h * w && y + i < c)
+                {
+                    gradinput[gradinputOffset] = gradinput_frag[i][j];
+                }
+                gradinputOffset = z * c * h * w + (y + i) * h * w + x + j + 32;
+                if (x + j + 32 < h * w && y + i < c)
+                {
+                    gradinput[gradinputOffset] = gradinput_frag[i][j + 4];
+                }
+                gradinputOffset = z * c * h * w + (y + i + 16) * h * w + x + j;
+                if (x + j < h * w && y + i + 16 < c)
+                {
+                    gradinput[gradinputOffset] = gradinput_frag[i + 4][j];
+                }
+                gradinputOffset = z * c * h * w + (y + i + 16) * h * w + x + j + 32;
+                if (x + j + 32 < h * w && y + i + 16 < c)
+                {
+                    gradinput[gradinputOffset] = gradinput_frag[i + 4][j + 4];
+                }
+            }
+        }
+
+    }
+
+    __global__ void implDgemmgradinputgroup( double * gradinput , const double * gradout ,const double * weight_ ,
+        const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    ){
+        // for alignment
+        __shared__ __align__(16 * 1024) char smem[32 * 1024];
+        double *smemweight = reinterpret_cast<double *>(smem);
+        double * smemgradout = reinterpret_cast<double *>(smem + 16 * 1024);
+
+        int tid = threadIdx.x;
+        int bx = blockIdx.x;
+        int by = blockIdx.y;
+
+        // Warp tile
+        // arrange like this: (to avoid bank conflict)
+        /*
+        in a warp tile
+        0   2   4   6   8   10  12  14
+        1   3   5   7   9   11  13  15
+        16  18  20  22  24  26  28  30
+        17  19  21  23  25  27  29  31
+        map to the gradinput: (each number correspond to 4x4 tile)
+        (so each laneid correspond to 8x8)
+        0   2   4   6   8   10  12  14 0   2   4   6   8   10  12  14
+        1   3   5   7   9   11  13  15 1   3   5   7   9   11  13  15
+        16  18  20  22  24  26  28  30 16  18  20  22  24  26  28  30
+        17  19  21  23  25  27  29  31 17  19  21  23  25  27  29  31
+        0   2   4   6   8   10  12  14 0   2   4   6   8   10  12  14
+        1   3   5   7   9   11  13  15 1   3   5   7   9   11  13  15
+        16  18  20  22  24  26  28  30 16  18  20  22  24  26  28  30
+        17  19  21  23  25  27  29  31 17  19  21  23  25  27  29  31
+        */
+        const int lane_id = threadIdx.x % 32;
+        const int warp_id = threadIdx.x / 32;
+        const int warp_tile_x = (lane_id / 2) % 8;
+        const int warp_tile_y = (lane_id / 16) * 2 + (lane_id % 2);
+
+        //lds address :in the gradinput tile
+        // correspond to the pos of the first laneid show in preceding tile
+        int weight_lds_addr = (warp_id / 2) * 32 + warp_tile_y * 4;
+        int gradout_lds_addr = (warp_id % 2) * 64 + warp_tile_x * 4;
+
+        //address in the whole output
+        int x = bx * 128 + gradout_lds_addr;
+        int y = by * 128 + weight_lds_addr;
+        int z = blockIdx.z; // batchid
+        int gid = blockIdx.z % g; // groupid
+
+        // register for load from global memory
+        // for pipeline
+        double weight_ldg_reg[4];
+        double gradout_ldg_reg[4];
+
+        // original position in the image for the points to load 
+        // in the gradout (individual with output)
+        /*
+        [0~32] , [0~32] , [0~32] , [0~32]
+        [32~64] , [32~64] , [32~64] , [32~64]
+        ...
+        */
+        int possoh_ori[4];
+        int possow_ori[4];
+        // calculate the pad for output grad
+        int soh = (oh - 1) * stride_h + 1;
+        int pad_h_out = (kh + h - 1 - soh + 1) / 2;
+        int sow = (ow - 1) * stride_w + 1;
+        int pad_w_out = (kw + w - 1 - sow + 1) / 2;
+
+    #pragma unroll
+        for(int i = 0; i < 4;i++){ // intialize ori
+            possoh_ori[i] = ((bx * 128 + tid % 32 + i * 32) / w) - pad_h_out;
+            possow_ori[i] = ((bx * 128 + tid % 32 + i * 32) % w) - pad_w_out;
+        }
+
+        // for load!
+        // kernel load like this:(transpose to store)
+        /*
+        0 0 0 0 8 8 8 8 ...
+        1 1 1 1 9 9 9 9
+        2 2 2 2 10 10 10 10
+        3 3 3 3 11 11 11 11
+        ....
+        */
+        int gradoutbatchoffset = z * k * oh * ow;
+        int weightC = (by * 128 + tid / 8 * 4);
+        int outkstep = oh * ow;
+        int weicstep = kh * kw;
+        int weikstep = c * kh * kw;
+        const double * weight = weight_ + gid * weikstep * k;
+
+        // sts addr : where to store in smem (the first position)
+        int weight_sts_addr = (tid % 8) * 132 + (tid / 8) * 4;
+        int gradout_sts_addr = (tid / 32) * 128 + (tid % 32);
+
+        // pipeline!
+        int write_flag = 1;
+        // frag for matmul
+        double weight_frag[2][8]; 
+        double gradout_frag[2][8];
+        double gradinput_frag[8][8];
 
     #pragma unroll
         for(int i = 0;i < 8;i++){ // initialize gradinput frag

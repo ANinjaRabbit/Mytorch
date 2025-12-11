@@ -3297,6 +3297,12 @@ namespace nn{
         const int oh , const int ow
     );
 
+    __global__ void implDgemmgroup( double * output , const double * input ,const double * weight_ ,const double * bias,
+        const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+
     template <typename T>
     void groupconv2d_forward_gpu( T * output , const T * input ,const T * weight ,const T * bias,
         const int n , const int c , const int h , const int w, const int g, const int k , const int kh , const int kw , 
@@ -3321,10 +3327,9 @@ namespace nn{
             );
         }
         else if constexpr (std::is_same_v<T , double>){ 
-            // need to implement
-            implDgemm<<<grid , block>>>(
+            implDgemmgroup<<<grid , block>>>(
                 output , input , weight , bias,
-                n , c , h , w, k , kh , kw , 
+                n , c , h , w, g, k , kh , kw , 
                 pad_h , pad_w , stride_h , stride_w,
                 oh , ow
             );
@@ -3333,6 +3338,12 @@ namespace nn{
 
 
     __global__ void implSgemmgradinputgroup( float * gradinput , const float * gradout ,const float * weight_ ,
+        const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
+        const int pad_h , const int pad_w , const int stride_h , const int stride_w,
+        const int oh , const int ow
+    );
+
+    __global__ void implDgemmgradinputgroup( double * gradinput , const double * gradout ,const double * weight_ ,
         const int n , const int c , const int h , const int w, const int g ,  const int k , const int kh , const int kw , 
         const int pad_h , const int pad_w , const int stride_h , const int stride_w,
         const int oh , const int ow
@@ -3361,14 +3372,12 @@ namespace nn{
             );
         }
         else if constexpr (std::is_same_v<T , double>){
-            // need to implement
-            implDgemmgradinput<<<grid , block>>>(
+            implDgemmgradinputgroup<<<grid , block>>>(
                 gradinput , gradout , weight ,
-                n , c , h , w , k , kh , kw , 
+                n , c , h , w, g , k , kh , kw , 
                 pad_h , pad_w , stride_h , stride_w,
                 oh , ow
             );
-
         }
     }
 
