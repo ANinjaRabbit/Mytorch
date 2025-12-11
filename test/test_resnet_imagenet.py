@@ -33,7 +33,7 @@ transform = transforms.Compose([
     transforms.Normalize((0.48024562, 0.4480722, 0.3975478), (0.27201378, 0.26554194, 0.27431726)),
 ])
 
-batch_size = 64
+batch_size = 40
 trainset = TinyImageNet(root="./data" , train=True , download=True , transform=transform_train)
 trainloader = torch.utils.data.DataLoader(trainset , batch_size=batch_size , shuffle=True , 
                                           num_workers=4 , pin_memory=True , persistent_workers=True , prefetch_factor=4)
@@ -56,10 +56,10 @@ if __name__ == '__main__':
         test_images.append(images)
         test_labels.append(labels)
 
-    resnet = mytorch.nn.ResNet18(num_classes=200 , h=64 , w=64)
+    resnet = mytorch.nn.ResNeXt34(num_classes=200 , h=64 , w=64)
 
     criterion = mytorch.nn.CrossEntropy()
-    optimizer = mytorch.optim.SGD(resnet.parameters() , lr = 0.1  , weight_decay=5e-4 , momentum=0.9)
+    optimizer = mytorch.optim.SGD(resnet.parameters() , lr = 0.1 , weight_decay=5e-4 , momentum=0.9)
     epochs = 100
     scheduler = mytorch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs , eta_min=1e-3)
 
@@ -88,7 +88,7 @@ if __name__ == '__main__':
             scheduler.step()
             avg_loss = running_loss / len(trainloader)
             print(f'[{epoch + 1}] loss: {avg_loss:.3f}')
-            writer.add_scalar("Loss/train of ResNet18 with SGD" , avg_loss , epoch)
+            writer.add_scalar("Loss/train of ResNeXt34 with SGD" , avg_loss , epoch)
 
             resnet.eval()
             total_correct = 0
@@ -98,7 +98,7 @@ if __name__ == '__main__':
                 total_correct += np.sum(predictions == labels)
             accuracy = total_correct / len(testset)
             print(f'Accuracy: {accuracy:.4f}')
-            writer.add_scalar("Accuracy/test of ResNet18 with SGD" , accuracy , epoch)
+            writer.add_scalar("Accuracy/test of ResNeXt34 with SGD" , accuracy , epoch)
     except KeyboardInterrupt:
         print("KeyboardInterrupt")
 
