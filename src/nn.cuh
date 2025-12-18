@@ -44,6 +44,22 @@ namespace nn{
                     param.zero_grad();
                 }
             }
+            virtual void save_module(std::ofstream & file){}
+            virtual void load_module(std::ifstream & file){}
+            void save(const std::string & path){
+                std::ofstream file(path , std::ios::binary);
+                save_module(file);
+                file.close();
+            }
+            bool load(const std::string & path){
+                std::ifstream file(path , std::ios::binary);
+                if(!file.is_open()){
+                    return false;
+                }
+                load_module(file);
+                file.close();
+                return true;
+            }
     };
 
 
@@ -362,6 +378,17 @@ namespace nn{
                 training = false;
                 for(auto & module : modules_){
                     module->eval();
+                }
+            }
+            void save_module(std::ofstream & file) override{
+                for(auto & module : modules_){
+                    module->save_module(file);
+                }
+            }
+            void load_module(std::ifstream & file) override{
+                params.clear();
+                for(auto & module : modules_){
+                    module->load_module(file);
                 }
             }
     };
@@ -2371,6 +2398,15 @@ namespace nn{
             std::vector<Tensor<T>> parameters() override{
                 return {weight , bias};
             }
+            void save_module(std::ofstream & file){
+                weight.save_tensor(file);
+                bias.save_tensor(file);
+            }
+            void load_module(std::ifstream & file){
+                weight.load_tensor(file);
+                bias.load_tensor(file);
+            }
+
     };
 
 
@@ -2635,25 +2671,25 @@ namespace nn{
         const T * grad_out , const int hw , const int c , const int size){
         // c for cout
         extern __shared__ char smem[];
-        float * bn_smem = reinterpret_cast<float *>(smem);
+        double * bn_smem = reinterpret_cast<double *>(smem);
         int tid = threadIdx.x;
         int cid = blockIdx.x;
         int warpId = tid / 32;
         int laneId = tid % 32;
         constexpr int warpsPerBlock = kCudaThreadsNum / 32;
-        float sum = 0;
+        double sum = 0;
         int chw = c * hw; // fan_out
         for(int offset = cid * hw;offset < size; offset += chw){
             for(int i = tid;i < hw;i += kCudaThreadsNum){
                 sum += grad_out[i + offset];
             }
         }
-        sum = warpReduceSum<T>(sum);
+        sum = warpReduceSum<double>(sum);
         if(laneId == 0) bn_smem[warpId] = sum;
         __syncthreads();
         if(tid < warpsPerBlock){
             sum = bn_smem[tid];
-            sum = warpReduceSum<T>(sum);
+            sum = warpReduceSum<double>(sum);
             if(tid == 0){
                 grad_bias[cid] = sum;
             }
@@ -2815,13 +2851,25 @@ namespace nn{
             int buf_size;
             cublasHandle_t handle;
             cudaStream_t stream_bias , stream_weight;
-            bool use_impl , use_cache;
+            bool use_impl , use_cache , use_bias;
         public:
             Tensor<T> kernel;
             Tensor<T> bias;
+            void save_module(std::ofstream & file) override{
+                kernel.save_tensor(file);
+                if(use_bias){
+                    bias.save_tensor(file);
+                }
+            }
+            void load_module(std::ifstream & file) override{
+                kernel.load_tensor(file);
+                if(use_bias){
+                    bias.load_tensor(file);
+                }
+            }
             Conv2d(const int in_channels , const int out_channels ,
-                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice , const bool use_impl = true) : 
-                 device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl){
+                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, const bool use_bias = true, Device device = DefaultDevice , const bool use_impl = true) : 
+                 device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl) , use_cache(false) , use_bias(use_bias){
                 if(kh % 2 == 0 || kw % 2 == 0){
                     std::cerr << "Conv2d: kernel size must be odd" << std::endl;
                     throw std::runtime_error("Conv2d: kernel size must be odd");
@@ -2829,7 +2877,9 @@ namespace nn{
                 int fan_in = in_channels * kh * kw;
                 T inv = nn_rsqrt<T>(fan_in);
                 kernel = rand<T>({out_channels , in_channels , kh , kw} , device) * 2 * inv  - inv;
-                bias = rand<T>({out_channels} , device) * 2 * inv - inv;
+                if(use_bias){
+                    bias = rand<T>({out_channels} , device) * 2 * inv - inv;
+                }
                 buf = 0;
                 buf_size = 0;
                 if(device == Cuda){
@@ -2885,7 +2935,7 @@ namespace nn{
                 int width_col = (w + 2 * pad_w - kw) / stride_w + 1;
                 int ckernelsize = kh * kw * in_channels;
 
-                Tensor<T> result({b , out_channels , height_col , width_col} , false , device);
+                Tensor<T> result({b , out_channels , height_col , width_col} , !use_bias , device);
                 int resultcoutstep = height_col * width_col;
                 int inputbatchstep = h * w * in_channels;
                 int n = in_channels * resultcoutstep;
@@ -2897,9 +2947,11 @@ namespace nn{
 
                 if(device == Cuda){
                     if(is_1x1_){ // no need to im2col
+                        if(use_bias){
                             _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
                                 resultget , bias.get() , resultsize , resultcoutstep , out_channels
                             );
+                        }
                         CHECK_CUBLAS(
                             cublasGemmStridedBatched<T>(
                                 handle,
@@ -2932,14 +2984,16 @@ namespace nn{
                             CHECK(cudaMalloc(&buf , buf_size * sizeof(T) ));
                         }
                         if(use_impl){
-                            conv2d_forward_gpu<T>(resultget , inputget , kernelget , bias.get(),
+                            conv2d_forward_gpu<T>(resultget , inputget , kernelget , !use_bias ? nullptr : bias.get(),
                             b , in_channels , h , w , out_channels , kh , kw , pad_h , pad_w, stride_h , stride_w , height_col , width_col
                         );
                         }
                         else{
-                            _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
-                                resultget , bias.get() , resultsize , resultcoutstep , out_channels
-                            );
+                            if(use_bias){
+                                _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
+                                    resultget , bias.get() , resultsize , resultcoutstep , out_channels
+                                );
+                            }
                             im2col_2d_batch<T , false>(buf, inputget,
                                 n, in_channels, h , w,
                                 kh , kw , pad_h , pad_w , stride_h , stride_w,
@@ -3033,7 +3087,10 @@ namespace nn{
                 const int col2im_n = h * w * in_channels;
 
                 Tensor<T> grad_kernel = make_view(kernel.get_grad() , kernel.shape());
-                Tensor<T> grad_bias = make_view(bias.get_grad() , bias.shape());
+                Tensor<T> grad_bias;
+                if(use_bias){
+                    grad_bias = make_view(bias.get_grad() , bias.shape());
+                }
                 Tensor<T> grad_in(input.shape() , false , device);
 
                 const T * inputget = input.get();
@@ -3041,7 +3098,7 @@ namespace nn{
                 const T * kernelget = kernel.get();
                 T * gradkernelget = grad_kernel.get();
                 T * gradinget = grad_in.get();
-                T * gradbiasget = grad_bias.get();
+                T * gradbiasget = use_bias ? grad_bias.get() : nullptr;
 
                 int gradoutsize = grad_out.size();
 
@@ -3169,6 +3226,7 @@ namespace nn{
                 }
 
 
+                if(use_bias){
                 if(device == Cuda){
                     _conv_bias_backward<<< out_channels , kCudaThreadsNum , kCudaThreadsNum / 32 * sizeof(float) , stream_bias>>>(
                         gradbiasget,
@@ -3189,6 +3247,8 @@ namespace nn{
                         gradbiasget[cid] = sum_grad;
 
                     }
+                }
+
                 }
                 if(device == Cuda){
                     if(is_1x1_){
@@ -3255,7 +3315,12 @@ namespace nn{
             }
 
             std::vector<Tensor<T>> parameters() override{
-                return {kernel , bias};
+                if(use_bias){
+                    return {kernel , bias};
+                }
+                else{
+                    return {kernel};
+                }
             }
 
     };
@@ -3407,12 +3472,24 @@ namespace nn{
             cublasHandle_t handle;
             cudaStream_t stream_bias;
             cudaStream_t stream_kernel;
-            bool use_impl;
+            bool use_impl , use_bias;
         public:
             Tensor<T> kernel;
             Tensor<T> bias;
+            void save_module(std::ofstream & file) override{
+                kernel.save_tensor(file);
+                if(use_bias){
+                    bias.save_tensor(file);
+                }
+            }
+            void load_module(std::ifstream & file) override{
+                kernel.load_tensor(file);
+                if(use_bias){
+                    bias.load_tensor(file);
+                }
+            }
             GroupConv2d(const int groups , const int in_channels , const int out_channels ,
-                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, Device device = DefaultDevice , const bool use_impl = true) : 
+                 const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, const bool use_bias = true, Device device = DefaultDevice , const bool use_impl = true) : 
                  groups(groups) , device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl){
                 if(kh % 2 == 0 || kw % 2 == 0){
                     std::cerr << "GroupConv2d: kernel size must be odd" << std::endl;
@@ -3423,7 +3500,9 @@ namespace nn{
                 int fan_in = groupcin * kh * kw;
                 T inv = nn_rsqrt<T>(fan_in);
                 kernel = rand<T>({groups , groupcout , groupcin , kh , kw} , device) * 2 * inv  - inv;
-                bias = rand<T>({out_channels} , device) * 2 * inv - inv;
+                if(use_bias){
+                    bias = rand<T>({out_channels} , device) * 2 * inv - inv;
+                }
                 buf = 0;
                 buf_size = 0;
                 kernel_buf = 0;
@@ -3490,7 +3569,7 @@ namespace nn{
                 int width_col = (w + 2 * pad_w - kw) / stride_w + 1;
                 int ckernelsize = kh * kw * groupcin;
 
-                Tensor<T> result({b , out_channels , height_col , width_col} , false , device);
+                Tensor<T> result({b , out_channels , height_col , width_col} , !use_bias , device);
                 int n = groupcin * height_col * width_col;
                 T * resultget = result.get();
                 const T * inputget = input.get();
@@ -3500,7 +3579,7 @@ namespace nn{
                 if(device == Cuda){
                     if(use_impl){
                         groupconv2d_forward_gpu<T>(
-                            resultget , inputget , kernelget , bias.get()
+                            resultget , inputget , kernelget , use_bias ? bias.get() : nullptr
                             , b * groups , groupcin , h , w , groups , groupcout,
                             kh , kw , pad_h , pad_w , stride_h , stride_w , height_col , width_col
                         );
@@ -3520,9 +3599,11 @@ namespace nn{
                             kernel_buf_size = b * kernel.size();
                             CHECK(cudaMalloc(&kernel_buf , kernel_buf_size * sizeof(T) ));
                         }
-                        _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
-                            resultget , bias.get() , resultsize , height_col * width_col , out_channels
-                        );
+                        if(use_bias){
+                            _conv_bias_init<T><<<CudaGetBlocks(resultsize) , kCudaThreadsNum >>>(
+                                resultget , bias.get() , resultsize , height_col * width_col , out_channels
+                            );
+                        }
                         im2col_2d_batch<T , false>(buf, inputget,
                             n, groupcin, h , w,
                             kh , kw , pad_h , pad_w , stride_h , stride_w,
@@ -3567,7 +3648,10 @@ namespace nn{
                         buf = new T[buf_size];
                     }
                     for(int i = 0;i < resultsize;i++){
-                        resultget[i] = bias.get()[(i / (height_col * width_col)) % out_channels];
+                        if(use_bias){
+                            resultget[i] = bias.get()[(i / (height_col * width_col)) % out_channels];
+                        }
+                        
                     }
                     im2col_2d_batch<T , false>(buf, inputget,
                         n, groupcin, h , w,
@@ -3642,7 +3726,10 @@ namespace nn{
                 int im2col_n = groupcin * height_col * width_col;
 
                 Tensor<T> grad_kernel = make_view(kernel.get_grad() , kernel.shape());
-                Tensor<T> grad_bias = make_view(bias.get_grad() , bias.shape());
+                Tensor<T> grad_bias;
+                if(use_bias){
+                    grad_bias = make_view(bias.get_grad() , bias.shape());
+                }
                 Tensor<T> grad_in(input.shape() , false , device);
 
                 const T * inputget = input.get();
@@ -3650,7 +3737,7 @@ namespace nn{
                 const T * kernelget = kernel.get();
                 T * gradkernelget = grad_kernel.get();
                 T * gradinget = grad_in.get();
-                T * gradbiasget = grad_bias.get();
+                T * gradbiasget = use_bias ? grad_bias.get() : nullptr;
 
                 int gradoutsize = grad_out.size();
 
@@ -3749,7 +3836,7 @@ namespace nn{
 
                 // gradout : b , (g * cout/g) , h * w
                 // gradbias : g * cout/g
-
+                if(use_bias){
                 if(device == Cuda){
                     _conv_bias_backward<<< out_channels , kCudaThreadsNum , kCudaThreadsNum / 32 * sizeof(float) , stream_bias>>>(
                         gradbiasget,
@@ -3771,6 +3858,9 @@ namespace nn{
 
                     }
                 }
+
+                }
+
 
                 if(device == Cuda){
                     // gradout : b , g , cout/g , h , w
@@ -3851,7 +3941,12 @@ namespace nn{
             }
 
             std::vector<Tensor<T>> parameters() override{
-                return {kernel , bias};
+                if(use_bias){
+                    return {kernel , bias};
+                }
+                else{
+                    return {kernel};
+                }
             }
 
     };
@@ -3976,7 +4071,7 @@ namespace nn{
     }
 
     template <typename T>
-    __global__ void _cross_entropy_forward_kernel(T * loss , const T * input , const T * label_cache , const int batchsize , const int step){
+    __global__ void _cross_entropy_forward_kernel(T * loss , const T * input , T * input_softmax , const T * label_cache , const int batchsize , const int step){
 
         extern __shared__ char shared_ce[];
         T * smem_ce = reinterpret_cast<T *>(shared_ce);
@@ -4010,7 +4105,9 @@ namespace nn{
         maxval = smem_ce[0];
         T sum = 0.0f;
         for (int i = tid; i < step; i += blockDim.x) {
-            sum += nn_exp_device<T>(x[i] - maxval);
+            T val = nn_exp_device<T>(x[i] - maxval);
+            input_softmax[idx * step + i] = val;
+            sum += val;
         }   
         sum = warpReduceSum<T>(sum);
         if( laneId == 0 ) 
@@ -4025,10 +4122,13 @@ namespace nn{
         }
         __syncthreads();
         sum = smem_ce[0];
+        for(int i = tid;i < step;i += blockDim.x){
+            input_softmax[idx * step + i] /= sum;
+        }
 
         int label = (int)label_cache[idx];
         if(tid == 0){
-            atomicAdd(loss , maxval - x[label] + logf(sum));
+            atomicAdd(loss , maxval - x[label] + __logf(sum));
         }
     }
 
@@ -4055,24 +4155,27 @@ namespace nn{
                 }
                 auto input = inputs[0];
                 auto label = inputs[1];
-                auto input_softmax = softmax(input);
+                if(input_softmax_cache.is_null() || input.shape() != input_softmax_cache.shape()){
+                    input_softmax_cache = Tensor<T>(input.shape() , false , input.device());
+                }
+                auto & input_softmax = input_softmax_cache;
                 if(input.requires_grad()){
                     input_cache = input;
-                    input_softmax_cache = input_softmax;
                     label_cache = label;
                 }
                 Tensor<T> loss(T(0) , {1} , input.device());
                 int batchsize = input.size() / input.shape().back();
                 int step = input.shape().back();
                 if(input.device() == Cpu){
+                    input_softmax = softmax(input);
                     for(int i = 0;i < batchsize;i++){
-                        loss.get()[0] += -log(input_softmax.get()[i * step + (int)label.get()[i]]);
+                        loss.get()[0] += -logf(input_softmax.get()[i * step + (int)label.get()[i]]);
                     }
                     loss.get()[0] /= batchsize;
                 }
                 else{
                     _cross_entropy_forward_kernel<<<batchsize , kCudaThreadsNum , sizeof(T) * kCudaThreadsNum / 32>>>(
-                        loss.get() , input.get() , label.get() , batchsize , step
+                        loss.get() , input.get() , input_softmax.get() , label.get() , batchsize , step
                     );
                     elementDivide<T><<<1 , 1>>>(loss.get() , batchsize);
                 }
@@ -4182,7 +4285,7 @@ namespace nn{
             sum = bn_smem[tid];
             sum = warpReduceSum<T>(sum);
             if(tid == 0){
-                running_mean[cid] = sum * (1 - momentum) + running_mean[cid] * momentum;
+                running_mean[cid] = sum * momentum + running_mean[cid] * (1 - momentum);
                 bn_smem[0] = sum;
             }
         }
@@ -4205,7 +4308,7 @@ namespace nn{
             sum = warpReduceSum<T>(sum);
             if(tid == 0){
                 var_inv_cache[cid] = nn_device_rsqrt<T>(sum + epsilon);
-                running_var[cid] = sum * (1 - momentum) + running_var[cid] * momentum;
+                running_var[cid] = sum * momentum + running_var[cid] * (1 - momentum);
             }
         }
         __syncthreads();
@@ -4322,6 +4425,18 @@ namespace nn{
         T momentum;
         T epsilon;
         int c;
+        void save_module(std::ofstream & file) override{
+            gamma.save_tensor(file);
+            beta.save_tensor(file);
+            running_mean.save_tensor(file);
+            running_var.save_tensor(file);
+        }
+        void load_module(std::ifstream & file) override{
+            gamma.load_tensor(file);
+            beta.load_tensor(file);
+            running_mean.load_tensor(file);
+            running_var.load_tensor(file);
+        }
             BatchNorm2d(const int num_features , T momentum = 0.1 , Device device = DefaultDevice) : c(num_features) , momentum(momentum){
                 gamma = ones<T>({num_features} , device);
                 beta = zeros<T>({num_features} , device);
@@ -4518,16 +4633,24 @@ namespace nn{
         std::shared_ptr<Sequential<T>> left , shortcut;
         std::vector<Tensor<T>> params;
         public:
+            void save_module(std::ofstream & file) override{
+                left->save_module(file);
+                shortcut->save_module(file);
+            }
+            void load_module(std::ifstream & file) override{
+                left->load_module(file);
+                shortcut->load_module(file);
+            }
             ResNeXtBlock(const int in_channels , const int out_channels , const int groups , const int bottleneck , const int stride = 1 , const Device device = DefaultDevice){
                 int middle_channels = out_channels / bottleneck;
                 left = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                    std::make_shared<Conv2d<T>>(in_channels , middle_channels , 1 , 1  , 0 , 0 , 1 , 1 , device),
+                    std::make_shared<Conv2d<T>>(in_channels , middle_channels , 1 , 1  , 0 , 0 , 1 , 1 , false, device),
                     std::make_shared<BatchNorm2d<T>>(middle_channels, 0.1 , device),
                     std::make_shared<ReLU<T>>(),
-                    std::make_shared<GroupConv2d<T>>(groups , middle_channels , middle_channels , 3 , 3  , 1 , 1 , stride , stride , device),
+                    std::make_shared<GroupConv2d<T>>(groups , middle_channels , middle_channels , 3 , 3  , 1 , 1 , stride , stride , false, device),
                     std::make_shared<BatchNorm2d<T>>(middle_channels, 0.1 , device),
                     std::make_shared<ReLU<T>>(),
-                    std::make_shared<Conv2d<T>>(middle_channels , out_channels , 1 , 1  , 0 , 0 , 1 , 1 , device),
+                    std::make_shared<Conv2d<T>>(middle_channels , out_channels , 1 , 1  , 0 , 0 , 1 , 1 , false, device),
                     std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
                 }));
 
@@ -4535,7 +4658,7 @@ namespace nn{
 
                 if( stride != 1 || in_channels != out_channels){
                     shortcut = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , device),
+                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , false, device),
                         std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
                     }));
                 }
@@ -4567,12 +4690,20 @@ namespace nn{
         std::shared_ptr<Sequential<T>> left , shortcut;
         std::vector<Tensor<T>> params;
         public:
+            void save_module(std::ofstream & file) override{
+                left->save_module(file);
+                shortcut->save_module(file);
+            }
+            void load_module(std::ifstream & file) override{
+                left->load_module(file);
+                shortcut->load_module(file);
+            }
             ResBlock(const int in_channels , const int out_channels , const int stride = 1 , const Device device = DefaultDevice){
                 left = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                    std::make_shared<Conv2d<T>>(in_channels , out_channels , 3 , 3  , 1 , 1 , stride , stride , device),
+                    std::make_shared<Conv2d<T>>(in_channels , out_channels , 3 , 3  , 1 , 1 , stride , stride , false, device),
                     std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device),
                     std::make_shared<ReLU<T>>(),
-                    std::make_shared<Conv2d<T>>(out_channels , out_channels , 3 , 3  , 1 , 1 , 1 , 1 , device),
+                    std::make_shared<Conv2d<T>>(out_channels , out_channels , 3 , 3  , 1 , 1 , 1 , 1 , false, device),
                     std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
                 }));
 
@@ -4580,7 +4711,7 @@ namespace nn{
 
                 if( stride != 1 || in_channels != out_channels){
                     shortcut = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , device),
+                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , false, device),
                         std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
                     }));
                 }
@@ -4606,204 +4737,6 @@ namespace nn{
                 shortcut->eval();
             }
     };
-    template <typename T>
-    class ResNet18Cifar : public Module<T>{
-        public:
-        std::shared_ptr<Sequential<T>> conv1;
-        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
-        std::shared_ptr<Linear<T>> fc;
-        std::vector<Tensor<T>> params;
-        int in_channels , h , w;
-        cudaStream_t streams[kStreamCount];
-        ResNet18Cifar(const int num_classes , const int h = 32 , const int w = 32) : h(h) , w(w){
-            in_channels = 64;
-            conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 5 , 5 , 2 , 2, 1 , 1),
-                std::make_shared<BatchNorm2d<T>>(64),
-                std::make_shared<ReLU<T>>()
-            }));
-            layer1 = make_layer(64 , 2 , 1);
-            layer2 = make_layer(128 , 2 , 2);
-            layer3 = make_layer(256 , 2 , 2);
-            layer4 = make_layer(512 , 2 , 2);
-            fc = std::make_shared<Linear<T>>(512 , num_classes);
-            params = conv1->parameters();
-            auto params1 = layer1->parameters();
-            params.insert(params.end() , params1.begin() , params1.end());
-            auto params2 = layer2->parameters();
-            params.insert(params.end() , params2.begin() , params2.end());
-            auto params3 = layer3->parameters();
-            params.insert(params.end() , params3.begin() , params3.end());
-            auto params4 = layer4->parameters();
-            params.insert(params.end() , params4.begin() , params4.end());
-            auto params5 = fc->parameters();
-            params.insert(params.end() , params5.begin() , params5.end());
-            for(int i = 0;i < kStreamCount;i++){
-                CHECK(cudaStreamCreate(&streams[i]));
-            }
-        }
-        ~ResNet18Cifar(){
-            for(int i = 0;i < kStreamCount;i++){
-                CHECK(cudaStreamDestroy(streams[i]));
-            }
-        }
-
-        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride){
-            std::vector<int> strides = {stride};
-            for(int i = 1;i < num_blocks;i++) strides.push_back(1);
-            std::vector<std::shared_ptr<Module<T>>> layers;
-            for(int i = 0;i < num_blocks;i++){
-                layers.push_back(std::make_shared<ResBlock<T>>(in_channels , channels , strides[i]));
-                in_channels = channels;
-            }
-            return std::make_shared<Sequential<T>>(layers);
-        }
-
-        Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-            auto out = conv1->forward(inputs);
-            out = layer1->forward({out});
-            out = layer2->forward({out});
-            out = layer3->forward({out});
-            out = layer4->forward({out});
-            out = out.avgpool2d(h / 8 , w / 8);
-            out = out.reshape({out.shape()[0] , 512});
-            out = fc->forward({out});
-            return out;
-        }
-
-        std::vector<Tensor<T>> parameters() override{
-            return params;
-        }
-
-        void zero_grad() override{
-            int i = 0;
-            for(auto & param : params){
-                param.zero_grad(streams[i % kStreamCount]);
-                i++;
-            }
-            for(int i = 0;i < kStreamCount;i++){
-                CHECK(cudaStreamSynchronize(streams[i]));
-            }
-        }
-        void train() override{
-            conv1->train();
-            layer1->train();
-            layer2->train();
-            layer3->train();
-            layer4->train();
-            fc->train();
-        }
-        void eval() override{
-            conv1->eval();
-            layer1->eval();
-            layer2->eval();
-            layer3->eval();
-            layer4->eval();
-            fc->eval();
-        }
-
-
-
-    };
-    template <typename T>
-    class ResNeXt18Cifar : public Module<T>{
-        public:
-        std::shared_ptr<Sequential<T>> conv1;
-        std::shared_ptr<Sequential<T>> layer1 , layer2 , layer3 , layer4;
-        std::shared_ptr<Linear<T>> fc;
-        std::vector<Tensor<T>> params;
-        int in_channels , h , w;
-        cudaStream_t streams[kStreamCount];
-        ResNeXt18Cifar(const int num_classes , const int h = 32 , const int w = 32) : h(h) , w(w){
-            in_channels = 64;
-            conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
-                std::make_shared<BatchNorm2d<T>>(64),
-                std::make_shared<ReLU<T>>()
-            }));
-            layer1 = make_layer(64 , 2 , 1   , 32 , 1);
-            layer2 = make_layer(128 , 2 , 2 , 32 , 1);
-            layer3 = make_layer(256 , 2 , 2 , 32 , 2);
-            layer4 = make_layer(512 , 2 , 2 , 32 , 4);
-            fc = std::make_shared<Linear<T>>(512 , num_classes);
-            params = conv1->parameters();
-            auto params1 = layer1->parameters();
-            params.insert(params.end() , params1.begin() , params1.end());
-            auto params2 = layer2->parameters();
-            params.insert(params.end() , params2.begin() , params2.end());
-            auto params3 = layer3->parameters();
-            params.insert(params.end() , params3.begin() , params3.end());
-            auto params4 = layer4->parameters();
-            params.insert(params.end() , params4.begin() , params4.end());
-            auto params5 = fc->parameters();
-            params.insert(params.end() , params5.begin() , params5.end());
-            for(int i = 0;i < kStreamCount;i++){
-                CHECK(cudaStreamCreate(&streams[i]));
-            }
-        }
-        ~ResNeXt18Cifar(){
-            for(int i = 0;i < kStreamCount;i++){
-                CHECK(cudaStreamDestroy(streams[i]));
-            }
-        }
-
-        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const int bottleneck = 1){
-            std::vector<int> strides = {stride};
-            for(int i = 1;i < num_blocks;i++) strides.push_back(1);
-            std::vector<std::shared_ptr<Module<T>>> layers;
-            for(int i = 0;i < num_blocks;i++){
-                layers.push_back(std::make_shared<ResNeXtBlock<T>>(in_channels , channels , groups , bottleneck , strides[i]));
-                in_channels = channels;
-            }
-            return std::make_shared<Sequential<T>>(layers);
-        }
-
-        Tensor<T> forward(const std::vector<Tensor<T>> & inputs) override{
-            auto out = conv1->forward(inputs);
-            out = layer1->forward({out});
-            out = layer2->forward({out});
-            out = layer3->forward({out});
-            out = layer4->forward({out});
-            out = out.avgpool2d(h / 8 , w / 8);
-            out = out.reshape({out.shape()[0] , 512});
-            out = fc->forward({out});
-            return out;
-        }
-
-        std::vector<Tensor<T>> parameters() override{
-            return params;
-        }
-
-        void zero_grad() override{
-            int i = 0;
-            for(auto & param : params){
-                param.zero_grad(streams[i % kStreamCount]);
-                i++;
-            }
-            for(int i = 0;i < kStreamCount;i++){
-                CHECK(cudaStreamSynchronize(streams[i]));
-            }
-        }
-        void train() override{
-            conv1->train();
-            layer1->train();
-            layer2->train();
-            layer3->train();
-            layer4->train();
-            fc->train();
-        }
-        void eval() override{
-            conv1->eval();
-            layer1->eval();
-            layer2->eval();
-            layer3->eval();
-            layer4->eval();
-            fc->eval();
-        }
-
-
-
-    };
 
     template <typename T>
     class ResNet18 : public Module<T>{
@@ -4814,10 +4747,26 @@ namespace nn{
         std::vector<Tensor<T>> params;
         int in_channels , h , w;
         cudaStream_t streams[kStreamCount];
+        void save_module(std::ofstream & file) override{
+            conv1->save_module(file);
+            layer1->save_module(file);
+            layer2->save_module(file);
+            layer3->save_module(file);
+            layer4->save_module(file);
+            fc->save_module(file);
+        }
+        void load_module(std::ifstream & file) override{
+            conv1->load_module(file);
+            layer1->load_module(file);
+            layer2->load_module(file);
+            layer3->load_module(file);
+            layer4->load_module(file);
+            fc->load_module(file);
+        }
         ResNet18(const int num_classes , const int h , const int w ) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1 , false),
                 std::make_shared<BatchNorm2d<T>>(64),
                 std::make_shared<ReLU<T>>(),
             }));
@@ -4911,10 +4860,26 @@ namespace nn{
         std::vector<Tensor<T>> params;
         int in_channels , h , w;
         cudaStream_t streams[kStreamCount];
+        void save_module(std::ofstream & file) override{
+            conv1->save_module(file);
+            layer1->save_module(file);
+            layer2->save_module(file);
+            layer3->save_module(file);
+            layer4->save_module(file);
+            fc->save_module(file);
+        }
+        void load_module(std::ifstream & file) override{
+            conv1->load_module(file);
+            layer1->load_module(file);
+            layer2->load_module(file);
+            layer3->load_module(file);
+            layer4->load_module(file);
+            fc->load_module(file);
+        } 
         ResNet34(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1 ),
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1 , false),
                 std::make_shared<BatchNorm2d<T>>(64),
                 std::make_shared<ReLU<T>>(),
             }));
@@ -5008,6 +4973,22 @@ namespace nn{
         std::vector<Tensor<T>> params;
         int in_channels , h , w;
         cudaStream_t streams[kStreamCount];
+        void save_module(std::ofstream & file) override{
+            conv1->save_module(file);
+            layer1->save_module(file);
+            layer2->save_module(file);
+            layer3->save_module(file);
+            layer4->save_module(file);
+            fc->save_module(file);
+        }
+        void load_module(std::ifstream & file) override{
+            conv1->load_module(file);
+            layer1->load_module(file);
+            layer2->load_module(file);
+            layer3->load_module(file);
+            layer4->load_module(file);
+            fc->load_module(file);
+        } 
         ResNeXt18(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
@@ -5108,6 +5089,22 @@ namespace nn{
         std::vector<Tensor<T>> params;
         int in_channels , h , w;
         cudaStream_t streams[kStreamCount];
+        void save_module(std::ofstream & file) override{
+            conv1->save_module(file);
+            layer1->save_module(file);
+            layer2->save_module(file);
+            layer3->save_module(file);
+            layer4->save_module(file);
+            fc->save_module(file);
+        }
+        void load_module(std::ifstream & file) override{
+            conv1->load_module(file);
+            layer1->load_module(file);
+            layer2->load_module(file);
+            layer3->load_module(file);
+            layer4->load_module(file);
+            fc->load_module(file);
+        } 
         ResNeXt34(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({

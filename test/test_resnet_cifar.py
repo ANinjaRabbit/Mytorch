@@ -10,30 +10,35 @@ from tqdm import tqdm
 sys.path.append("../build/Release/")
 import mytorch
 import time
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
 
 
 
 transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-    transforms.RandomRotation(15),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+transforms.RandomCrop(32, padding=4),
+transforms.RandomHorizontalFlip(),
+transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10),
+transforms.ToTensor(),
+transforms.Normalize((0.4913996458053589, 0.48215845227241516, 0.44653093814849854),
+                        (0.2470322549343109, 0.24348513782024384, 0.26158788800239563))
 ])
+
 
 
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+transforms.Normalize((0.4913996458053589, 0.48215845227241516, 0.44653093814849854),
+                        (0.2470322549343109, 0.24348513782024384, 0.26158788800239563))
 ])
 
 batch_size = 128
 trainset = torchvision.datasets.CIFAR10(root="./data" , train=True , download=True , transform=transform_train)
 trainloader = torch.utils.data.DataLoader(trainset , batch_size=batch_size , shuffle=True , 
                                           num_workers=4 , pin_memory=True , persistent_workers=True , prefetch_factor=4)
+
 testset = torchvision.datasets.CIFAR10(root="./data" , train=False , download=True , transform=transform)
-testloader = torch.utils.data.DataLoader(testset , batch_size=batch_size , shuffle=True , 
+testloader = torch.utils.data.DataLoader(testset , batch_size=batch_size , shuffle=False , 
                                           num_workers=4 , pin_memory=True , persistent_workers=True , prefetch_factor=4)
 
 # preload testdatas
@@ -54,13 +59,13 @@ if __name__ == '__main__':
         test_images.append(images)
         test_labels.append(labels)
 
-    resnet = mytorch.nn.ResNet18Cifar(num_classes=10)
+    resnet = mytorch.nn.ResNet18(num_classes=10 , h=32 , w=32)
 
     criterion = mytorch.nn.CrossEntropy()
-    optimizer = mytorch.optim.Adam(resnet.parameters() , lr = 1e-3  , weight_decay=0.00001)
+    optimizer = mytorch.optim.AdamW(resnet.parameters() , lr =0.001 , weight_decay=5e-4)
 
-    epochs = 100
-    scheduler = mytorch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs , eta_min=3e-5)
+    epochs = 5
+    scheduler = mytorch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
 
 
@@ -87,6 +92,8 @@ if __name__ == '__main__':
             scheduler.step()
             avg_loss = running_loss / len(trainloader)
             print(f'[{epoch + 1}] loss: {avg_loss:.3f}')
+            writer.add_scalar("Loss/train of ResNet18 on CIFAR10" , avg_loss , epoch)
+
             resnet.eval()
             total_correct = 0
             for inputs, labels in zip(test_images, test_labels):
@@ -95,6 +102,7 @@ if __name__ == '__main__':
                 total_correct += np.sum(predictions == labels)
             accuracy = total_correct / len(testset)
             print(f'Accuracy: {accuracy:.4f}')
+            writer.add_scalar("Accuracy/test of ResNet18 on CIFAR10" , accuracy , epoch)
     except KeyboardInterrupt:
         print("KeyboardInterrupt")
 
@@ -103,34 +111,4 @@ if __name__ == '__main__':
 
     
     resnet.eval()
-
-    # prepare to count predictions for each class
-    correct_pred = {classname: 0 for classname in classes}
-    total_pred = {classname: 0 for classname in classes}
-
-    # again no gradients needed
-    with torch.no_grad():
-        for data in testloader:
-            images, labels = data
-            images = mytorch.tensor_from_numpy(images)
-            labels = labels.numpy()
-            outputs = resnet(images)
-            outputs = outputs.numpy()
-            predictions = np.argmax(outputs, 1)
-
-            # collect the correct predictions for each class
-            for label, prediction in zip(labels, predictions):
-                if label == prediction:
-                    correct_pred[classes[label]] += 1
-                total_pred[classes[label]] += 1
-    total = 0
-    totalcorrect = 0
-
-    # print accuracy for each class
-    for classname, correct_count in correct_pred.items():
-        total += total_pred[classname]
-        totalcorrect += correct_count
-        accuracy = 100 * float(correct_count) / total_pred[classname]
-        print(f'Accuracy for class: {classname:5s} is {accuracy:.1f} %')
-
-    print(f'Total Accuracy: {100 * totalcorrect / total} %')
+    resnet.save("resnet18_cifar10.pth")

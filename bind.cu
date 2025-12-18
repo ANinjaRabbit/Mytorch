@@ -156,6 +156,8 @@ void bind_module(py::module &m_mod) {
         .def("train" , &Module<T>::train , "Set the module to training mode.")
         .def("eval" , &Module<T>::eval , "Set the module to evaluation mode.")
         .def("zero_grad" , &Module<T>::zero_grad , "Zero the gradients of all learnable parameters.")
+        .def("save" , &Module<T>::save , "Save the module parameters to a file.")
+        .def("load" , &Module<T>::load , "Load the module parameters from a file.")
         ;
 
         // Subclasses
@@ -372,18 +374,6 @@ void bind_module(py::module &m_mod) {
         "Flatten layer to convert multi-dimensional input to a 1D vector.")
         .def(py::init<int , int>() , py::kw_only() , py::arg("start_dim") = 0 , py::arg("end_dim") = -1);
 
-    py::class_<ResNet18Cifar<T> , Module<T> , std::shared_ptr<ResNet18Cifar<T>>>(m_mod, "ResNet18Cifar",
-        "ResNet18 model for CIFAR-10.")
-        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
-        .def("eval" , &ResNet18Cifar<T>::eval , "Set the module to evaluation mode.")
-        .def("train" , &ResNet18Cifar<T>::train , "Set the module to training mode.");
-
-    py::class_<ResNeXt18Cifar<T> , Module<T> , std::shared_ptr<ResNeXt18Cifar<T>>>(m_mod, "ResNeXt18Cifar",
-        "ResNeXt18 model for CIFAR-10.")
-        .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") = 32 , py::arg("w") = 32)
-        .def("eval" , &ResNeXt18Cifar<T>::eval , "Set the module to evaluation mode.")
-        .def("train" , &ResNeXt18Cifar<T>::train , "Set the module to training mode.");
-    
     py::class_<ResNet18<T> , Module<T> , std::shared_ptr<ResNet18<T>>>(m_mod, "ResNet18",
         "ResNet18 model")
         .def(py::init<int , int , int>() , py::kw_only() , py::arg("num_classes") , py::arg("h") , py::arg("w"))
@@ -421,7 +411,9 @@ void bind_optim(py::module &m_optim) {
     py::class_<Optimizer<T> , std::shared_ptr<Optimizer<T>>>(m_optim, "Optimizer",
         "Base class for optimizers.")
         .def(py::init<T , T>() , py::kw_only() , py::arg("lr") = T(0.01) , py::arg("weight_decay") = T(0.0))
-        .def("step", &Optimizer<T>::step, "Update all parameters in-place.");
+        .def("step", &Optimizer<T>::step, "Update all parameters in-place.")
+        .def_readwrite("lr" , &Optimizer<T>::lr_)
+        .def_readwrite("weight_decay" , &Optimizer<T>::weight_decay_);
 
     // ---------------- SGD ----------------
     py::class_<SGD<T> , Optimizer<T> , std::shared_ptr<SGD<T>>>(m_optim, "SGD",

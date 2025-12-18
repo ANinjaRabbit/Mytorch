@@ -20,13 +20,11 @@ writer = SummaryWriter()
 transform_train = transforms.Compose([
     transforms.RandomCrop(64, padding=4),
     transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
+    transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET),
     transforms.ToTensor(),
     transforms.Normalize((0.48024562, 0.4480722, 0.3975478), (0.27201378, 0.26554194, 0.27431726)),
 
-
 ])
-
 
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -37,6 +35,7 @@ batch_size = 40
 trainset = TinyImageNet(root="./data" , train=True , download=True , transform=transform_train)
 trainloader = torch.utils.data.DataLoader(trainset , batch_size=batch_size , shuffle=True , 
                                           num_workers=4 , pin_memory=True , persistent_workers=True , prefetch_factor=4)
+
 testset = TinyImageNet(root="./data" , train=False , download=True , transform=transform)
 testloader = torch.utils.data.DataLoader(testset , batch_size=batch_size , shuffle=False , 
                                           num_workers=4 , pin_memory=True , persistent_workers=True , prefetch_factor=4)

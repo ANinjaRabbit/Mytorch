@@ -6,6 +6,7 @@
 #include <random>
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 
 #include "curand.h"
 
@@ -610,6 +611,35 @@ namespace mytorch{
                     grad_ = cuda_shared_pointer<T>(this->size() , this->device() , false);
                 }
             }
+            void save_tensor(std::ofstream & file){  
+                file.write(reinterpret_cast<const char*>(&this->size_) , sizeof(int));
+
+                if(this->device() == Cuda){
+                    cuda_shared_pointer<T> temp = this->data_.deepcopy();
+                    temp.to(Cpu);
+                    file.write(reinterpret_cast<const char*>(temp.get()) , sizeof(T) * this->size());
+                }
+                else{
+                    file.write(reinterpret_cast<const char*>(this->data_.get()) , sizeof(T) * this->size());
+ 
+                }
+            
+            }
+            void load_tensor(std::ifstream & file){
+                int load_size = 0;
+                file.read(reinterpret_cast<char*>(&load_size) , sizeof(int));
+                if(load_size != this->size()){
+                    std::cerr << "load_tensor: size not match, expect " << this->size() << " but get " << load_size << std::endl;
+                    throw std::runtime_error("load_tensor: size not match");
+                }
+                cuda_shared_pointer<T> temp(this->size() , Cpu);
+                file.read(reinterpret_cast<char*>(temp.get()) , sizeof(T) * this->size());
+                Device dev = this->device();
+                this->data_ = temp;
+                if(dev == Cuda){
+                    this->to(dev);
+                }
+            }
     };
 
 
@@ -1138,7 +1168,15 @@ namespace mytorch{
             size_t __get_shared_id() const{
                 return (size_t)data_ptr_.get();
             }
+
+            void load_tensor(std::ifstream & file){
+                (*data_ptr_).load_tensor(file);
+            }
+            void save_tensor(std::ofstream & file){
+                (*data_ptr_).save_tensor(file);
+            }
     };
+
 
     template <typename U>
     Tensor<U> arange(const U & start ,const U & end , const U & step , const Device device = DefaultDevice ){

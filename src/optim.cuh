@@ -143,7 +143,7 @@ namespace mytorch{
                 v[idx] = beta2 * v[idx] + (1.0 - beta2) * grad[idx] * grad[idx];
                 float m_hat = m[idx] / (beta1_corr);
                 float v_hat = v[idx] / (beta2_corr);
-                param[idx] -= lr * ( m_hat / (nn::nn_device_sqrt<float>(v_hat) + eps) +  weight_decay * param[idx]);
+                param[idx] -= lr * ( m_hat * rsqrtf(v_hat + eps) +  weight_decay * param[idx]);
             }
         }
         template <typename T>
@@ -252,12 +252,14 @@ namespace mytorch{
                 T T_max_;
                 T eta_min_;
                 int last_epoch_;
+                T cos_val_;
                 public:
-                    CosineAnnealingLR(std::shared_ptr<Optimizer<T>> optimizer , T T_max , T eta_min = T(0)) : optimizer_(optimizer) , T_max_(T_max) , eta_min_(eta_min) , last_epoch_(0){}
+                    CosineAnnealingLR(std::shared_ptr<Optimizer<T>> optimizer , T T_max , T eta_min = T(0)) : optimizer_(optimizer) , T_max_(T_max) , eta_min_(eta_min) , last_epoch_(0) , cos_val_(1){}
                     void step(){
                         last_epoch_++;
-                        T cos_val = cospif( static_cast<T>(last_epoch_) / T_max_);
-                        T lr = eta_min_ + (optimizer_->lr_ - eta_min_) * (T(1) + cos_val) / T(2);
+                        T new_cos_val_ = cospif( static_cast<T>(last_epoch_) / T_max_);
+                        T lr = eta_min_ + (optimizer_->lr_ - eta_min_) * (1 + new_cos_val_) / (1 + cos_val_);
+                        cos_val_ = new_cos_val_;
                         optimizer_->lr_ = lr;
                     }
             };

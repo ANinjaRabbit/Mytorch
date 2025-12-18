@@ -8,10 +8,11 @@ using namespace mytorch;
 
 int main(){
     DefaultDevice = Cuda;
-    auto X = rand<float>({32 , 3 , 64 , 64});
+    auto X = ones<float>({32 , 3 , 32 , 32});
     X.set_requires_grad(true);
-    auto y  = rand<float>({32}) * 200;
-    auto model = nn::ResNet34<float>(200 , 64 , 64);
+    auto y  = ones<float>({32}) * 9;
+    auto model = nn::ResNet18<float>(10 , 32 , 32);
+    model.load("resnet18_cifar10.pth");
     auto params = model.parameters();
 
 
@@ -20,7 +21,7 @@ int main(){
     cudaEvent_t start , stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    for(int i = 0 ; i < 1000 ; i++){
+    for(int i = 0 ; i < 10 ; i++){
         std::cout << "Iteration " << i << " ";
         optimizer->zero_grad();
         cudaEventRecord(start);
@@ -37,7 +38,7 @@ int main(){
         std::cout << "loss " <<std::fixed<< loss.item() << "\n";
 
     }
-    for(auto & param : params){
-        param.get_grad_tensor().print();
-    }
+
+    model.save("resnet18_cifar10.pth");
+
 }

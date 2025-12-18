@@ -508,7 +508,7 @@ namespace nn{
         float * smembias = reinterpret_cast<float *>(smem + 16 * 1024);
 
         if(tid < 128){
-            smembias[tid] = bias[by * 128 + tid];
+            smembias[tid] = bias ? bias[by * 128 + tid] : 0;
         }
 
         // only store a quater of the output!
@@ -830,7 +830,7 @@ namespace nn{
         double * smembias = reinterpret_cast<double *>(smem + 16 * 1024);
 
         if(tid < 128){
-            smembias[tid] = bias[by * 128 + tid];
+            smembias[tid] = bias ? bias[by * 128 + tid] : 0;
         }
 
         // only store a quater of the output!
@@ -1151,7 +1151,7 @@ namespace nn{
         float * smembias = reinterpret_cast<float *>(smem + 16 * 1024);
 
         if(tid < 128){
-            smembias[tid] = bias[by * 128 + tid];
+            smembias[tid] = bias ? bias[by * 128 + tid] : 0;
         }
 
         // only store a quater of the output!
@@ -1470,7 +1470,7 @@ namespace nn{
         double * smembias = reinterpret_cast<double *>(smem + 16 * 1024);
 
         if(tid < 128){
-            smembias[tid] = bias[by * 128 + tid];
+            smembias[tid] = bias ? bias[by * 128 + tid] : 0;
         }
 
         // only store a quater of the output!

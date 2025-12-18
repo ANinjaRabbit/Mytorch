@@ -40,11 +40,11 @@ if __name__ == '__main__':
         mytorch.nn.Conv2d(3, 6, 5),
         mytorch.nn.BatchNorm2d(6),
         mytorch.nn.ReLU(),
-        mytorch.nn.MaxPool2d([2, 2]),
+        mytorch.nn.MaxPool2d(2),
         mytorch.nn.Conv2d(6, 16, 5),
         mytorch.nn.BatchNorm2d(16),
         mytorch.nn.ReLU(),
-        mytorch.nn.MaxPool2d([2, 2]),
+        mytorch.nn.MaxPool2d(2),
         mytorch.nn.Flatten(start_dim = 1),
         mytorch.nn.Linear(5 * 5 * 16, 120),
         mytorch.nn.ReLU(),
@@ -55,9 +55,9 @@ if __name__ == '__main__':
 
 
     criterion = mytorch.nn.CrossEntropy()
-    optimizer = mytorch.optim.Adam(lenet.parameters() , lr = 0.001  , weight_decay=0.00001)
+    optimizer = mytorch.optim.AdamW(lenet.parameters() , lr = 0.001  , weight_decay=0.00001)
 
-    epochs = 1
+    epochs = 100
     scheduler = mytorch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs , eta_min=0.0001)
 
 

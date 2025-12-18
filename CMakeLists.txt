@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(pybind11)
 find_package(CUDAToolkit REQUIRED)
 link_directories("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/bin/x64")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -use_fast_math -O3 -restrict")
+#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -use_fast_math -O3 -restrict")
 
 
 
@@ -22,9 +22,9 @@ set(SRC
 pybind11_add_module(mytorch ${SRC})
 target_compile_options(mytorch PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
-        -use_fast_math
-        -O3
-        -restrict
+    -use_fast_math
+    -O3
+    -restrict
     >
 )
 
