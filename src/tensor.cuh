@@ -895,12 +895,14 @@ namespace mytorch{
             }
             Device device() const{
                 if(!data_ptr_){
+                    std::cerr << "device() on null tensor" << std::endl;
                     throw std::runtime_error("device() on null tensor");
                 }
                 return data_ptr_->device();
             }
             const std::vector<int> & shape() const{
                 if(!data_ptr_){
+                    std::cerr << "shape() on null tensor" << std::endl;
                     throw std::runtime_error("shape() on null tensor");
                 }
                 return data_ptr_->shape();

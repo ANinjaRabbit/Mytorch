@@ -3490,7 +3490,7 @@ namespace nn{
             }
             GroupConv2d(const int groups , const int in_channels , const int out_channels ,
                  const int kh , const int kw , const int pad_h = 0 , const int pad_w = 0 , const int stride_h = 1 , const int stride_w = 1, const bool use_bias = true, Device device = DefaultDevice , const bool use_impl = true) : 
-                 groups(groups) , device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl){
+                 groups(groups) , device(device) , kh(kh) , kw(kw) , pad_h(pad_h) , pad_w(pad_w) , stride_h(stride_h) , stride_w(stride_w) , in_channels(in_channels) , out_channels(out_channels) , use_impl(use_impl) , use_bias(use_bias){
                 if(kh % 2 == 0 || kw % 2 == 0){
                     std::cerr << "GroupConv2d: kernel size must be odd" << std::endl;
                     throw std::runtime_error("GroupConv2d: kernel size must be odd");
@@ -4641,16 +4641,16 @@ namespace nn{
                 left->load_module(file);
                 shortcut->load_module(file);
             }
-            ResNeXtBlock(const int in_channels , const int out_channels , const int groups , const int bottleneck , const int stride = 1 , const Device device = DefaultDevice){
+            ResNeXtBlock(const int in_channels , const int out_channels , const int groups , const float bottleneck , const int stride = 1 , const Device device = DefaultDevice){
                 int middle_channels = out_channels / bottleneck;
                 left = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                    std::make_shared<Conv2d<T>>(in_channels , middle_channels , 1 , 1  , 0 , 0 , 1 , 1 , false, device),
+                    std::make_shared<Conv2d<T>>(in_channels , middle_channels , 1 , 1  , 0 , 0 , 1 , 1 , true , device),
                     std::make_shared<BatchNorm2d<T>>(middle_channels, 0.1 , device),
                     std::make_shared<ReLU<T>>(),
-                    std::make_shared<GroupConv2d<T>>(groups , middle_channels , middle_channels , 3 , 3  , 1 , 1 , stride , stride , false, device),
+                    std::make_shared<GroupConv2d<T>>(groups , middle_channels , middle_channels , 3 , 3  , 1 , 1 , stride , stride , true, device),
                     std::make_shared<BatchNorm2d<T>>(middle_channels, 0.1 , device),
                     std::make_shared<ReLU<T>>(),
-                    std::make_shared<Conv2d<T>>(middle_channels , out_channels , 1 , 1  , 0 , 0 , 1 , 1 , false, device),
+                    std::make_shared<Conv2d<T>>(middle_channels , out_channels , 1 , 1  , 0 , 0 , 1 , 1 , true , device),
                     std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
                 }));
 
@@ -4658,7 +4658,7 @@ namespace nn{
 
                 if( stride != 1 || in_channels != out_channels){
                     shortcut = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , false, device),
+                        std::make_shared<Conv2d<T>>(in_channels , out_channels , 1 , 1 , 0 , 0 , stride , stride , true, device),
                         std::make_shared<BatchNorm2d<T>>(out_channels, 0.1 , device)
                     }));
                 }
@@ -4992,14 +4992,14 @@ namespace nn{
         ResNeXt18(const int num_classes , const int h = 64 , const int w = 64) : h(h) , w(w){
             in_channels = 64;
             conv1 = std::make_shared<Sequential<T>>(std::vector<std::shared_ptr<Module<T>>>({
-                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1),
+                std::make_shared<Conv2d<T>>(3 , 64 , 3 , 3 , 1 , 1, 1 , 1 , true),
                 std::make_shared<BatchNorm2d<T>>(64),
                 std::make_shared<ReLU<T>>()
             }));
-            layer1 = make_layer(64 , 2 , 1   , 32 , 1);
-            layer2 = make_layer(128 , 2 , 2 , 32 , 2);
-            layer3 = make_layer(256 , 2 , 2 , 32 , 2);
-            layer4 = make_layer(512 , 2 , 2 , 32 , 4);
+            layer1 = make_layer(64 , 2 , 1   , 8 ,2);
+            layer2 = make_layer(128 , 2 , 2 , 8 , 2);
+            layer3 = make_layer(256 , 2 , 2 , 8 , 2);
+            layer4 = make_layer(512 , 2 , 2 , 8 , 4);
             fc = std::make_shared<Linear<T>>(512 , num_classes);
             params = conv1->parameters();
             auto params1 = layer1->parameters();
@@ -5022,7 +5022,7 @@ namespace nn{
             }
         }
 
-        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const int bottleneck = 1){
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const float bottleneck = 1){
             std::vector<int> strides = {stride};
             for(int i = 1;i < num_blocks;i++) strides.push_back(1);
             std::vector<std::shared_ptr<Module<T>>> layers;
@@ -5112,10 +5112,10 @@ namespace nn{
                 std::make_shared<BatchNorm2d<T>>(64),
                 std::make_shared<ReLU<T>>()
             }));
-            layer1 = make_layer(64 , 3 , 1   , 32 , 1);
-            layer2 = make_layer(128 , 4 , 2 , 32 , 2);
-            layer3 = make_layer(256 , 6 , 2 , 32 , 2);
-            layer4 = make_layer(512 , 3 , 2 , 32 , 4);
+            layer1 = make_layer(64 , 3 , 1   , 8 , 2);
+            layer2 = make_layer(128 , 4 , 2 , 8 , 2);
+            layer3 = make_layer(256 , 6 , 2 , 8 , 2);
+            layer4 = make_layer(512 , 3 , 2 , 8 , 4);
             fc = std::make_shared<Linear<T>>(512 , num_classes);
             params = conv1->parameters();
             auto params1 = layer1->parameters();
@@ -5138,7 +5138,7 @@ namespace nn{
             }
         }
 
-        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 32 , const int bottleneck = 1){
+        std::shared_ptr<Sequential<T>> make_layer( const int channels , const int num_blocks , const int stride , const int groups = 8 , const int bottleneck = 2){
             std::vector<int> strides = {stride};
             for(int i = 1;i < num_blocks;i++) strides.push_back(1);
             std::vector<std::shared_ptr<Module<T>>> layers;

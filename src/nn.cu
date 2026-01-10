@@ -1,9 +1,14 @@
 #include "nn.cuh"
 #include "math.cuh"
+#include <cuda_runtime.h>
 
 namespace mytorch{
 
 namespace nn{
+
+    #define FETCH_FLOAT4(pointer) (reinterpret_cast<float4*>(&(pointer))[0])
+    #define FETCH_FLOAT4_CONST(pointer) (reinterpret_cast<const float4*>(&(pointer))[0])
+
 
 
     __global__ void _softmax_kernel_small_512f(float * output , const float * input ,const int N, const int C){
@@ -326,9 +331,8 @@ namespace nn{
 
     #pragma unroll
         for(int i = 0;i < 8;i++){ // initialize output frag
-            for(int j = 0;j < 8;j++){
-                output_frag[i][j] = 0;
-            }
+            FETCH_FLOAT4(output_frag[i][0]) = make_float4(0.0f,0.0f,0.0f,0.0f);
+            FETCH_FLOAT4(output_frag[i][4]) = make_float4(0.0f,0.0f,0.0f,0.0f);
         }
 
         // perform the first load from global(ldg) for pipeline
@@ -387,16 +391,10 @@ namespace nn{
         __syncthreads();
         // load from shared(lds)
         // load the number we need in matmul
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            weight_frag[0][i] = smemweight[weight_lds_addr + i];
-            weight_frag[0][i+4] = smemweight[weight_lds_addr + i + 16];
-        }
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            input_frag[0][i] = smeminput[input_lds_addr + i];
-            input_frag[0][i+4] = smeminput[input_lds_addr + i + 32];
-        }
+        FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr]);
+        FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr + 16]);
+        FETCH_FLOAT4(input_frag[0][0]) = FETCH_FLOAT4_CONST(smeminput[input_lds_addr]);
+        FETCH_FLOAT4(input_frag[0][4]) = FETCH_FLOAT4_CONST(smeminput[input_lds_addr + 32]);
         for(int crs = 0; crs < c * kh * kw;crs+= 8){
             // prefetch for pipeline
             // first kernel
@@ -445,19 +443,13 @@ namespace nn{
     #pragma unroll
             for (int subcrs = 0; subcrs < 8 - 1; ++subcrs)
             {
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    weight_frag[(subcrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i];
-                    weight_frag[(subcrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i + 16];
-                }
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    input_frag[(subcrs + 1) % 2][i] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i];
-                    input_frag[(subcrs + 1) % 2][i + 4] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i + 32];
-                }
 
+                FETCH_FLOAT4(weight_frag[(subcrs + 1) % 2][0]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 ]);
+                FETCH_FLOAT4(weight_frag[(subcrs + 1) % 2][4]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + 16]);
+
+
+                FETCH_FLOAT4( input_frag[(subcrs + 1) % 2][0]) =FETCH_FLOAT4_CONST( smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 ]);
+                FETCH_FLOAT4( input_frag[(subcrs + 1) % 2][4]) =FETCH_FLOAT4_CONST( smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + 32]);
     #pragma unroll
                 for (int i = 0; i < 8; ++i)
                 {
@@ -470,10 +462,7 @@ namespace nn{
             }
 
             // store to shared mem
-            for (int i = 0; i < 4; ++i)
-            {
-                smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
-            }
+            FETCH_FLOAT4(  smemweight[write_flag * 132 * 8 + weight_sts_addr ] )= FETCH_FLOAT4_CONST(weight_ldg_reg[0]);
             for (int i = 0; i < 4; ++i)
             {
                 smeminput[write_flag * 128 * 8 + input_sts_addr + i * 32] = input_ldg_reg[i];
@@ -481,18 +470,10 @@ namespace nn{
             __syncthreads();
 
             write_flag ^= 1;
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
-                weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
-            }
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                input_frag[0][i] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i];
-                input_frag[0][i + 4] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i + 32];
-            }
+            FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr]);
+            FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + 16]);
+            FETCH_FLOAT4( input_frag[0][0]) = FETCH_FLOAT4( smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr ]);
+            FETCH_FLOAT4( input_frag[0][4]) = FETCH_FLOAT4( smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + 32]);
     #pragma unroll
             for (int i = 0; i < 8; ++i)
             {
@@ -969,10 +950,10 @@ namespace nn{
 
     #pragma unroll
         for(int i = 0;i < 8;i++){ // initialize output frag
-            for(int j = 0;j < 8;j++){
-                output_frag[i][j] = 0;
-            }
+            FETCH_FLOAT4(output_frag[i][0]) = make_float4(0.0f,0.0f,0.0f,0.0f);
+            FETCH_FLOAT4(output_frag[i][4]) = make_float4(0.0f,0.0f,0.0f,0.0f);
         }
+        //replace using float4
 
         // perform the first load from global(ldg) for pipeline
 
@@ -1019,10 +1000,8 @@ namespace nn{
         }
 
         // stores to shared (sts)
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            smemweight[weight_sts_addr + i] = weight_ldg_reg[i];
-        }
+        FETCH_FLOAT4(smemweight[weight_sts_addr]) = FETCH_FLOAT4_CONST(weight_ldg_reg[0]);
+
     #pragma unroll
         for(int i = 0;i < 4;i++){
             smeminput[input_sts_addr + i * 32] = input_ldg_reg[i];
@@ -1030,16 +1009,10 @@ namespace nn{
         __syncthreads();
         // load from shared(lds)
         // load the number we need in matmul
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            weight_frag[0][i] = smemweight[weight_lds_addr + i];
-            weight_frag[0][i+4] = smemweight[weight_lds_addr + i + 16];
-        }
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            input_frag[0][i] = smeminput[input_lds_addr + i];
-            input_frag[0][i+4] = smeminput[input_lds_addr + i + 32];
-        }
+        FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr]);
+        FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr + 16]);
+        FETCH_FLOAT4(input_frag[0][0]) = FETCH_FLOAT4_CONST(smeminput[input_lds_addr]);
+        FETCH_FLOAT4(input_frag[0][4]) = FETCH_FLOAT4_CONST(smeminput[input_lds_addr + 32]);
         for(int crs = 0; crs < c * kh * kw;crs+= 8){
             // prefetch for pipeline
             // first kernel
@@ -1088,18 +1061,12 @@ namespace nn{
     #pragma unroll
             for (int subcrs = 0; subcrs < 8 - 1; ++subcrs)
             {
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    weight_frag[(subcrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i];
-                    weight_frag[(subcrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + i + 16];
-                }
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    input_frag[(subcrs + 1) % 2][i] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i];
-                    input_frag[(subcrs + 1) % 2][i + 4] = smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + i + 32];
-                }
+                FETCH_FLOAT4(weight_frag[(subcrs + 1) % 2][0]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 ]);
+                FETCH_FLOAT4(weight_frag[(subcrs + 1) % 2][4]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subcrs + 1) * 132 + 16]);
+
+
+                FETCH_FLOAT4( input_frag[(subcrs + 1) % 2][0]) =FETCH_FLOAT4_CONST( smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 ]);
+                FETCH_FLOAT4( input_frag[(subcrs + 1) % 2][4]) =FETCH_FLOAT4_CONST( smeminput[load_flag * 128 * 8 + input_lds_addr + (subcrs + 1) * 128 + 32]);
 
     #pragma unroll
                 for (int i = 0; i < 8; ++i)
@@ -1112,30 +1079,21 @@ namespace nn{
                 }
             }
 
-            // store to shared mem
-            for (int i = 0; i < 4; ++i)
-            {
-                smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
-            }
+            FETCH_FLOAT4(  smemweight[write_flag * 132 * 8 + weight_sts_addr ] )= FETCH_FLOAT4_CONST(weight_ldg_reg[0]);
+
+    #pragma unroll
             for (int i = 0; i < 4; ++i)
             {
                 smeminput[write_flag * 128 * 8 + input_sts_addr + i * 32] = input_ldg_reg[i];
             }
+
             __syncthreads();
 
             write_flag ^= 1;
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
-                weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
-            }
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                input_frag[0][i] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i];
-                input_frag[0][i + 4] = smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + i + 32];
-            }
+            FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr]);
+            FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + 16]);
+            FETCH_FLOAT4( input_frag[0][0]) = FETCH_FLOAT4( smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr ]);
+            FETCH_FLOAT4( input_frag[0][4]) = FETCH_FLOAT4( smeminput[(load_flag ^ 1) * 128 * 8 + input_lds_addr + 32]);
     #pragma unroll
             for (int i = 0; i < 8; ++i)
             {
@@ -1617,9 +1575,8 @@ namespace nn{
 
     #pragma unroll
         for(int i = 0;i < 8;i++){ // initialize gradinput frag
-            for(int j = 0;j < 8;j++){
-                gradinput_frag[i][j] = 0;
-            }
+            FETCH_FLOAT4(gradinput_frag[i][0]) = make_float4(0.0f,0.0f,0.0f,0.0f);
+            FETCH_FLOAT4(gradinput_frag[i][4]) = make_float4(0.0f,0.0f,0.0f,0.0f);
         }
 
         // perform the first load from global(ldg) for pipeline
@@ -1677,10 +1634,7 @@ namespace nn{
         }
 
         // stores to shared (sts)
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            smemweight[weight_sts_addr + i] = weight_ldg_reg[i];
-        }
+        FETCH_FLOAT4(smemweight[weight_sts_addr]) = FETCH_FLOAT4_CONST(weight_ldg_reg[0]);
     #pragma unroll
         for(int i = 0;i < 4;i++){
             smemgradout[gradout_sts_addr + i * 32] = gradout_ldg_reg[i];
@@ -1688,16 +1642,10 @@ namespace nn{
         __syncthreads();
         // load from shared(lds)
         // load the number we need in matmul
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            weight_frag[0][i] = smemweight[weight_lds_addr + i];
-            weight_frag[0][i+4] = smemweight[weight_lds_addr + i + 16];
-        }
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            gradout_frag[0][i] = smemgradout[gradout_lds_addr + i];
-            gradout_frag[0][i+4] = smemgradout[gradout_lds_addr + i + 32];
-        }
+        FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr]);
+        FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr + 16]);
+        FETCH_FLOAT4(gradout_frag[0][0]) = FETCH_FLOAT4_CONST(smemgradout[gradout_lds_addr]);
+        FETCH_FLOAT4(gradout_frag[0][4]) = FETCH_FLOAT4_CONST(smemgradout[gradout_lds_addr + 32]);
         for(int krs = 0; krs < k * kh * kw ; krs += 8){
             // prefetch for pipeline
             // first kernel
@@ -1758,18 +1706,12 @@ namespace nn{
     #pragma unroll
             for (int subkrs = 0; subkrs < 8 - 1; ++subkrs)
             {
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    weight_frag[(subkrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + i];
-                    weight_frag[(subkrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + i + 16];
-                }
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    gradout_frag[(subkrs + 1) % 2][i] = smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + i];
-                    gradout_frag[(subkrs + 1) % 2][i + 4] = smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + i + 32];
-                }
+                FETCH_FLOAT4(weight_frag[(subkrs + 1) % 2][0]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 ]);
+                FETCH_FLOAT4(weight_frag[(subkrs + 1) % 2][4]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + 16]);
+
+
+                FETCH_FLOAT4( gradout_frag[(subkrs + 1) % 2][0]) =FETCH_FLOAT4_CONST( smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 ]);
+                FETCH_FLOAT4( gradout_frag[(subkrs + 1) % 2][4]) =FETCH_FLOAT4_CONST( smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + 32]);
 
     #pragma unroll
                 for (int i = 0; i < 8; ++i)
@@ -1783,10 +1725,7 @@ namespace nn{
             }
 
             // store to shared mem
-            for (int i = 0; i < 4; ++i)
-            {
-                smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
-            }
+            FETCH_FLOAT4(  smemweight[write_flag * 132 * 8 + weight_sts_addr ] )= FETCH_FLOAT4_CONST(weight_ldg_reg[0]);
             for (int i = 0; i < 4; ++i)
             {
                 smemgradout[write_flag * 128 * 8 + gradout_sts_addr + i * 32] = gradout_ldg_reg[i];
@@ -1794,18 +1733,11 @@ namespace nn{
             __syncthreads();
 
             write_flag ^= 1;
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
-                weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
-            }
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                gradout_frag[0][i] = smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + i];
-                gradout_frag[0][i + 4] = smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + i + 32];
-            }
+
+            FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr]);
+            FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + 16]);
+            FETCH_FLOAT4( gradout_frag[0][0]) = FETCH_FLOAT4( smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr]);
+            FETCH_FLOAT4( gradout_frag[0][4]) = FETCH_FLOAT4( smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + 32]);
     #pragma unroll
             for (int i = 0; i < 8; ++i)
             {
@@ -2287,9 +2219,8 @@ namespace nn{
 
     #pragma unroll
         for(int i = 0;i < 8;i++){ // initialize gradinput frag
-            for(int j = 0;j < 8;j++){
-                gradinput_frag[i][j] = 0;
-            }
+            FETCH_FLOAT4(gradinput_frag[i][0]) = make_float4(0.0f,0.0f,0.0f,0.0f);
+            FETCH_FLOAT4(gradinput_frag[i][4]) = make_float4(0.0f,0.0f,0.0f,0.0f);
         }
 
         // perform the first load from global(ldg) for pipeline
@@ -2358,16 +2289,10 @@ namespace nn{
         __syncthreads();
         // load from shared(lds)
         // load the number we need in matmul
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            weight_frag[0][i] = smemweight[weight_lds_addr + i];
-            weight_frag[0][i+4] = smemweight[weight_lds_addr + i + 16];
-        }
-    #pragma unroll
-        for(int i = 0;i < 4;i++){
-            gradout_frag[0][i] = smemgradout[gradout_lds_addr + i];
-            gradout_frag[0][i+4] = smemgradout[gradout_lds_addr + i + 32];
-        }
+        FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr]);
+        FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[weight_lds_addr + 16]);
+        FETCH_FLOAT4(gradout_frag[0][0]) = FETCH_FLOAT4_CONST(smemgradout[gradout_lds_addr]);
+        FETCH_FLOAT4(gradout_frag[0][4]) = FETCH_FLOAT4_CONST(smemgradout[gradout_lds_addr + 32]);
         for(int krs = 0; krs < k * kh * kw ; krs += 8){
             // prefetch for pipeline
             // first kernel
@@ -2428,18 +2353,12 @@ namespace nn{
     #pragma unroll
             for (int subkrs = 0; subkrs < 8 - 1; ++subkrs)
             {
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    weight_frag[(subkrs + 1) % 2][i] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + i];
-                    weight_frag[(subkrs + 1) % 2][i + 4] = smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + i + 16];
-                }
-    #pragma unroll
-                for (int i = 0; i < 4; ++i)
-                {
-                    gradout_frag[(subkrs + 1) % 2][i] = smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + i];
-                    gradout_frag[(subkrs + 1) % 2][i + 4] = smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + i + 32];
-                }
+                FETCH_FLOAT4(weight_frag[(subkrs + 1) % 2][0]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 ]);
+                FETCH_FLOAT4(weight_frag[(subkrs + 1) % 2][4]) = FETCH_FLOAT4_CONST(smemweight[load_flag * 132 * 8 + weight_lds_addr + (subkrs + 1) * 132 + 16]);
+
+
+                FETCH_FLOAT4( gradout_frag[(subkrs + 1) % 2][0]) =FETCH_FLOAT4_CONST( smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 ]);
+                FETCH_FLOAT4( gradout_frag[(subkrs + 1) % 2][4]) =FETCH_FLOAT4_CONST( smemgradout[load_flag * 128 * 8 + gradout_lds_addr + (subkrs + 1) * 128 + 32]);
 
     #pragma unroll
                 for (int i = 0; i < 8; ++i)
@@ -2453,10 +2372,7 @@ namespace nn{
             }
 
             // store to shared mem
-            for (int i = 0; i < 4; ++i)
-            {
-                smemweight[write_flag * 132 * 8 + weight_sts_addr + i] = weight_ldg_reg[i];
-            }
+            FETCH_FLOAT4(  smemweight[write_flag * 132 * 8 + weight_sts_addr ] )= FETCH_FLOAT4_CONST(weight_ldg_reg[0]);
             for (int i = 0; i < 4; ++i)
             {
                 smemgradout[write_flag * 128 * 8 + gradout_sts_addr + i * 32] = gradout_ldg_reg[i];
@@ -2464,18 +2380,10 @@ namespace nn{
             __syncthreads();
 
             write_flag ^= 1;
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                weight_frag[0][i] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i];
-                weight_frag[0][i + 4] = smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + i + 16];
-            }
-    #pragma unroll
-            for (int i = 0; i < 4; ++i)
-            {
-                gradout_frag[0][i] = smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + i];
-                gradout_frag[0][i + 4] = smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + i + 32];
-            }
+            FETCH_FLOAT4(weight_frag[0][0]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr]);
+            FETCH_FLOAT4(weight_frag[0][4]) = FETCH_FLOAT4_CONST(smemweight[(load_flag ^ 1) * 132 * 8 + weight_lds_addr + 16]);
+            FETCH_FLOAT4( gradout_frag[0][0]) = FETCH_FLOAT4( smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr]);
+            FETCH_FLOAT4( gradout_frag[0][4]) = FETCH_FLOAT4( smemgradout[(load_flag ^ 1) * 128 * 8 + gradout_lds_addr + 32]);
     #pragma unroll
             for (int i = 0; i < 8; ++i)
             {

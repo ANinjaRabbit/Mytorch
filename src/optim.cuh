@@ -162,6 +162,10 @@ namespace mytorch{
             public:
                 AdamW(std::vector<Tensor<T>> & params,const T lr = T(0.001) ,const T beta1 = T(0.9) , const T beta2 = T(0.999) , const T eps = T(1e-8) , const T weight_decay = T(0) , Device device = DefaultDevice) : Optimizer<T>(lr , weight_decay) , beta1_(beta1) , beta2_(beta2) , eps_(eps) , params_(params) , device_(device){
                     for(auto & param : params_){
+                        if(param.is_null()){
+                            std::cerr << "param is null" << std::endl;
+                            throw std::runtime_error("param is null");
+                        }
                         m_.emplace_back(zeros<T>(param.shape() , param.device()));
                         v_.emplace_back(zeros<T>(param.shape() , param.device()));
                     }
