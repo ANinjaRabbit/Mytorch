@@ -19,8 +19,10 @@ mytorch.set_default_device(mytorch.Cuda)
 
 transform = transforms.Compose([
     transforms.ToTensor(),
-transforms.Normalize((0.4913996458053589, 0.48215845227241516, 0.44653093814849854),
-                        (0.2470322549343109, 0.24348513782024384, 0.26158788800239563))
+    transforms.Normalize(
+            mean=[0.4914, 0.4822, 0.4465],
+            std=[0.2023, 0.1994, 0.2010]
+        )
 ])
 
 
@@ -99,31 +101,35 @@ if __name__ == '__main__':
     transforms.RandomHorizontalFlip(),
     transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10),
     transforms.ToTensor(),
-    transforms.Normalize((0.4913996458053589, 0.48215845227241516, 0.44653093814849854),
-                            (0.2470322549343109, 0.24348513782024384, 0.26158788800239563))
+    transforms.Normalize(
+            mean=[0.4914, 0.4822, 0.4465],
+            std=[0.2023, 0.1994, 0.2010]
+        )
     ])
     if modelname == "resnet18":
         model = mytorch.nn.ResNet18(num_classes=10 , h=32 , w=32)
-        optimizer = mytorch.optim.AdamW(model.parameters() , lr =0.001 , weight_decay=5e-4)
+        optimizer = mytorch.optim.AdamW(model.parameters() , lr =0.001 , weight_decay=1e-4)
         batch_size = 200
     elif modelname == "resnet34":
         model = mytorch.nn.ResNet34(num_classes=10 , h=32 , w=32)
-        optimizer = mytorch.optim.AdamW(model.parameters() , lr =0.001 , weight_decay=5e-4)
+        optimizer = mytorch.optim.AdamW(model.parameters() , lr =0.001 , weight_decay=1e-4)
         batch_size = 40
     elif modelname == "resnext18":
         transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize((0.4913996458053589, 0.48215845227241516, 0.44653093814849854),
-                                (0.2470322549343109, 0.24348513782024384, 0.26158788800239563))
+        transforms.Normalize(
+                mean=[0.4914, 0.4822, 0.4465],
+                std=[0.2023, 0.1994, 0.2010]
+            )
         ])
         model = mytorch.nn.ResNeXt18(num_classes=10 , h=32 , w=32)
-        optimizer = mytorch.optim.AdamW(model.parameters() , lr=0.001  , weight_decay=5e-4)
+        optimizer = mytorch.optim.AdamW(model.parameters() , lr=0.001  , weight_decay=1e-4)
         batch_size = 200
     elif modelname == "resnext34":
         model = mytorch.nn.ResNeXt34(num_classes=10 , h=32 , w=32)
-        optimizer = mytorch.optim.AdamW(model.parameters() , lr =0.001 , weight_decay=5e-4)
+        optimizer = mytorch.optim.AdamW(model.parameters() , lr =0.001 , weight_decay=1e-4)
         batch_size = 40
     else:
         raise ValueError(f"Unknown model name: {modelname}")

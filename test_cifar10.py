@@ -14,8 +14,10 @@ mytorch.set_default_device(mytorch.Cuda)
 
 transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.4913996458053589, 0.48215845227241516, 0.44653093814849854),
-                            (0.2470322549343109, 0.24348513782024384, 0.26158788800239563))
+    transforms.Normalize(
+            mean=[0.4914, 0.4822, 0.4465],
+            std=[0.2023, 0.1994, 0.2010]
+        )
 ])
 
 batch_size = 128
